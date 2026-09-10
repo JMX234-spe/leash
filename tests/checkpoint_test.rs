@@ -140,3 +140,99 @@ fn test_list_checkpoints_session_filter() {
     let list_none = backend.list_checkpoints(Some("session-c")).unwrap();
     assert!(list_none.is_empty());
 }
+
+#[test]
+fn test_checkpoint_in_unborn_repo() {
+    let temp = tempdir().unwrap();
+    let repo = Repository::init(temp.path()).expect("Failed to init git repo");
+    let mut config = repo.config().unwrap();
+    config.set_str("user.name", "Test User").unwrap();
+    config.set_str("user.email", "test@example.com").unwrap();
+    config.set_bool("core.autocrlf", false).unwrap();
+
+    // Notice: NO commits made to repo yet! HEAD is unborn!
+    let backend = GitCheckpointBackend::discover(temp.path()).unwrap();
+    let file = temp.path().join("first_code.rs");
+    fs::write(&file, "fn first() {}\n").unwrap();
+
+    let cp = backend
+        .create_checkpoint("session-unborn", "initial workdir")
+        .expect("Failed to create checkpoint on unborn repo");
+    assert!(!cp.id.is_empty());
+
+    let list = backend.list_checkpoints(None).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].id, cp.id);
+
+    // Modify file
+    fs::write(&file, "fn corrupted() {}\n").unwrap();
+    backend
+        .restore_checkpoint(&cp.id)
+        .expect("Failed to restore checkpoint on unborn repo");
+
+    let restored = fs::read_to_string(&file).unwrap().replace("\r\n", "\n");
+    assert_eq!(restored, "fn first() {}\n");
+}
+
+#[test]
+fn test_checkpoint_excludes_leash_directory() {
+    let temp = tempdir().unwrap();
+    let repo = setup_git_repo(temp.path());
+    let backend = GitCheckpointBackend::discover(temp.path()).unwrap();
+
+    // Create .leash directory with policy and logs
+    let leash_dir = temp.path().join(".leash");
+    fs::create_dir_all(&leash_dir).unwrap();
+    let policy_file = leash_dir.join("policy.yaml");
+    let log_file = leash_dir.join("log.jsonl");
+    fs::write(&policy_file, "version: 1\n").unwrap();
+    fs::write(&log_file, "{\"event\":\"initial\"}\n").unwrap();
+
+    let code_file = temp.path().join("main.rs");
+    fs::write(&code_file, "fn main() { 1 }\n").unwrap();
+
+    let cp = backend
+        .create_checkpoint("sess-leash", "test exclude .leash")
+        .unwrap();
+
+    // 1. Verify that the checkpoint commit tree explicitly DOES NOT contain .leash
+    let obj = repo.revparse_single(&cp.id).unwrap();
+    let commit = obj.peel_to_commit().unwrap();
+    let tree = commit.tree().unwrap();
+    assert!(
+        tree.get_name(".leash").is_none(),
+        "Checkpoint git tree must NOT contain .leash directory"
+    );
+
+    // 2. Append to log and modify policy after checkpoint
+    fs::write(
+        &log_file,
+        "{\"event\":\"initial\"}\n{\"event\":\"second\"}\n",
+    )
+    .unwrap();
+    fs::write(&code_file, "fn main() { 2 }\n").unwrap();
+
+    // 3. Restore checkpoint
+    backend.restore_checkpoint(&cp.id).unwrap();
+
+    // Verify code_file was restored
+    let code = fs::read_to_string(&code_file)
+        .unwrap()
+        .replace("\r\n", "\n");
+    assert_eq!(code, "fn main() { 1 }\n");
+
+    // 4. Verify .leash files remain intact and logs were NOT reverted!
+    assert!(
+        policy_file.exists(),
+        ".leash/policy.yaml must not be deleted on rewind"
+    );
+    assert!(
+        log_file.exists(),
+        ".leash/log.jsonl must not be deleted on rewind"
+    );
+    let log_content = fs::read_to_string(&log_file).unwrap().replace("\r\n", "\n");
+    assert_eq!(
+        log_content, "{\"event\":\"initial\"}\n{\"event\":\"second\"}\n",
+        "Audit log must remain append-only and not be reverted by rewind"
+    );
+}

@@ -241,3 +241,41 @@ fn test_cli_checkpoints_and_rewind() {
     assert_eq!(restored, "version 1.0\n");
     assert!(!unwanted.exists());
 }
+
+#[test]
+fn test_commands_outside_git_repo_show_clean_error() {
+    let empty_temp = tempdir().unwrap();
+
+    // 1. leash run outside git repo
+    let mut run_cmd = Command::cargo_bin("leash").unwrap();
+    run_cmd
+        .current_dir(empty_temp.path())
+        .args(["run", "--", "echo", "hello"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "[LEASH ERROR] Leash requires a git repository. Run 'git init' first.",
+        ));
+
+    // 2. leash checkpoints outside git repo
+    let mut cp_cmd = Command::cargo_bin("leash").unwrap();
+    cp_cmd
+        .current_dir(empty_temp.path())
+        .arg("checkpoints")
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "[LEASH ERROR] Leash requires a git repository. Run 'git init' first.",
+        ));
+
+    // 3. leash rewind outside git repo
+    let mut rw_cmd = Command::cargo_bin("leash").unwrap();
+    rw_cmd
+        .current_dir(empty_temp.path())
+        .args(["rewind", "dummy123", "--yes"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "[LEASH ERROR] Leash requires a git repository. Run 'git init' first.",
+        ));
+}

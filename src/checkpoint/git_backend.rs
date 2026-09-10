@@ -46,6 +46,7 @@ impl GitCheckpointBackend {
     ///
     /// The checkpoint is saved as a commit in the hidden reference `refs/leash/checkpoints`.
     /// The user's active branch and HEAD are completely untouched.
+    /// The `.leash/` directory is explicitly excluded from the snapshot.
     pub fn create_checkpoint(&self, session_id: &str, description: &str) -> Result<Checkpoint> {
         let repo = git2::Repository::open(&self.repo_root)
             .context("Failed to open git repository for checkpoint")?;
@@ -59,6 +60,26 @@ impl GitCheckpointBackend {
         index
             .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
             .context("Failed to add working directory files to index")?;
+
+        // Explicitly exclude the .leash/ directory from checkpoint snapshot
+        let to_remove: Vec<PathBuf> = index
+            .iter()
+            .filter_map(|entry| {
+                let path_str = std::str::from_utf8(&entry.path).ok()?;
+                if path_str.starts_with(".leash/")
+                    || path_str.starts_with(".leash\\")
+                    || path_str == ".leash"
+                {
+                    Some(PathBuf::from(path_str))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for path in to_remove {
+            let _ = index.remove_path(&path);
+        }
 
         let tree_id = index
             .write_tree_to(&repo)
@@ -82,10 +103,7 @@ impl GitCheckpointBackend {
 
         // Check if refs/leash/checkpoints already exists
         let parent_commit = match repo.find_reference(CHECKPOINT_REF) {
-            Ok(reference) => {
-                let peeled = reference.peel_to_commit().ok();
-                peeled
-            }
+            Ok(reference) => reference.peel_to_commit().ok(),
             Err(_) => None,
         };
 
@@ -160,6 +178,7 @@ impl GitCheckpointBackend {
     /// Restores the working tree and index to the exact state of `checkpoint_id`.
     ///
     /// The user's current branch reference and HEAD remain unchanged.
+    /// The `.leash/` directory is preserved across rewinds.
     pub fn restore_checkpoint(&self, checkpoint_id: &str) -> Result<Checkpoint> {
         let repo =
             git2::Repository::open(&self.repo_root).context("Failed to open git repository")?;
@@ -180,6 +199,18 @@ impl GitCheckpointBackend {
         let msg = commit.message().unwrap_or_default();
         let checkpoint_info = parse_commit_message(&short_id, &commit, msg);
 
+        // Preserve the local .leash directory (audit logs, policies) across rewind
+        let leash_dir = self.repo_root.join(".leash");
+        let temp_backup = if leash_dir.exists() {
+            let temp = tempfile::tempdir().context("Failed to create tempdir for .leash backup")?;
+            let backup_dest = temp.path().join(".leash");
+            copy_dir_all(&leash_dir, &backup_dest)
+                .context("Failed to backup .leash directory before rewind")?;
+            Some((temp, backup_dest))
+        } else {
+            None
+        };
+
         // Checkout tree with force and remove untracked to restore working tree
         let mut checkout = git2::build::CheckoutBuilder::new();
         checkout.force();
@@ -195,8 +226,32 @@ impl GitCheckpointBackend {
             .context("Failed to read tree into index")?;
         index.write().context("Failed to write index")?;
 
+        // Restore .leash directory after checkout
+        if let Some((_temp_guard, backup_path)) = temp_backup {
+            if !leash_dir.exists() {
+                let _ = std::fs::create_dir_all(&leash_dir);
+            }
+            copy_dir_all(&backup_path, &leash_dir)
+                .context("Failed to restore .leash directory after rewind")?;
+        }
+
         Ok(checkpoint_info)
     }
+}
+
+fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let dest_path = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_all(&entry.path(), &dest_path)?;
+        } else {
+            std::fs::copy(entry.path(), dest_path)?;
+        }
+    }
+    Ok(())
 }
 
 fn parse_commit_message(short_id: &str, commit: &git2::Commit, message: &str) -> Checkpoint {

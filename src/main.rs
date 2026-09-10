@@ -94,17 +94,26 @@ async fn main() -> Result<()> {
                 PolicyAction::Allow => {}
             }
 
-            // Create pre-execution checkpoint if inside a git repository
+            // Ensure we are inside a git repository for checkpointing
+            let backend = match GitCheckpointBackend::open_current() {
+                Ok(b) => b,
+                Err(_) => {
+                    eprintln!(
+                        "[LEASH ERROR] Leash requires a git repository. Run 'git init' first."
+                    );
+                    std::process::exit(1);
+                }
+            };
+
+            // Create pre-execution checkpoint
             let session_id = generate_session_id();
-            if let Ok(backend) = GitCheckpointBackend::open_current() {
-                let desc = format!("before: {}", full_command);
-                match backend.create_checkpoint(&session_id, &desc) {
-                    Ok(cp) => {
-                        eprintln!("[LEASH] Created pre-execution checkpoint {}", cp.id);
-                    }
-                    Err(e) => {
-                        tracing::warn!("Could not create automatic checkpoint: {}", e);
-                    }
+            let desc = format!("before: {}", full_command);
+            match backend.create_checkpoint(&session_id, &desc) {
+                Ok(cp) => {
+                    eprintln!("[LEASH] Created pre-execution checkpoint {}", cp.id);
+                }
+                Err(e) => {
+                    tracing::warn!("Could not create automatic checkpoint: {}", e);
                 }
             }
 
@@ -114,8 +123,10 @@ async fn main() -> Result<()> {
         Commands::Checkpoints(args) => {
             let backend = match GitCheckpointBackend::open_current() {
                 Ok(b) => b,
-                Err(e) => {
-                    eprintln!("Error: {}", e);
+                Err(_) => {
+                    eprintln!(
+                        "[LEASH ERROR] Leash requires a git repository. Run 'git init' first."
+                    );
                     std::process::exit(1);
                 }
             };
@@ -146,8 +157,10 @@ async fn main() -> Result<()> {
         Commands::Rewind(args) => {
             let backend = match GitCheckpointBackend::open_current() {
                 Ok(b) => b,
-                Err(e) => {
-                    eprintln!("Error: {}", e);
+                Err(_) => {
+                    eprintln!(
+                        "[LEASH ERROR] Leash requires a git repository. Run 'git init' first."
+                    );
                     std::process::exit(1);
                 }
             };
