@@ -75,4 +75,8 @@ pub struct LogArgs {
     /// Show only the last N events
     #[arg(short = 'n', long)]
     pub tail: Option<usize>,
+
+    /// Output raw JSONL instead of formatted human-readable table
+    #[arg(long)]
+    pub json: bool,
 }

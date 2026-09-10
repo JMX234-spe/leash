@@ -11,6 +11,22 @@ pub enum PolicyAction {
     Deny,
 }
 
+impl PolicyAction {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PolicyAction::Allow => "allow",
+            PolicyAction::Ask => "ask",
+            PolicyAction::Deny => "deny",
+        }
+    }
+}
+
+impl std::fmt::Display for PolicyAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 /// A single declarative security rule.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyRule {

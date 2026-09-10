@@ -2,6 +2,27 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::tempdir;
 
+fn init_git_repo(path: &std::path::Path) {
+    let run_git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .status()
+            .expect("Failed to execute git command");
+        assert!(status.success());
+    };
+
+    run_git(&["init"]);
+    run_git(&["config", "user.name", "CLI Tester"]);
+    run_git(&["config", "user.email", "clitester@example.com"]);
+    run_git(&["config", "core.autocrlf", "false"]);
+
+    let initial_file = path.join("init.txt");
+    std::fs::write(&initial_file, "init\n").unwrap();
+    run_git(&["add", "init.txt"]);
+    run_git(&["commit", "-m", "init commit"]);
+}
+
 #[test]
 fn test_cli_help_displays_subcommands() {
     let mut cmd = Command::cargo_bin("leash").unwrap();
@@ -107,9 +128,13 @@ fn test_run_ask_command_non_interactive_treated_as_deny() {
 
 #[test]
 fn test_run_echo_hola() {
+    let temp = tempdir().unwrap();
+    init_git_repo(temp.path());
+
     let shell = if cfg!(windows) { "sh" } else { "bash" };
     let mut cmd = Command::cargo_bin("leash").unwrap();
-    cmd.args(["run", "--", shell, "-c", "echo hola"])
+    cmd.current_dir(temp.path())
+        .args(["run", "--", shell, "-c", "echo hola"])
         .assert()
         .success()
         .stdout(predicate::str::contains("hola"));
@@ -117,28 +142,36 @@ fn test_run_echo_hola() {
 
 #[test]
 fn test_run_interactive_python() {
+    let temp = tempdir().unwrap();
+    init_git_repo(temp.path());
+
     let python = if cfg!(windows) { "python" } else { "python3" };
     let mut cmd = Command::cargo_bin("leash").unwrap();
-    cmd.args([
-        "run",
-        "--",
-        python,
-        "-c",
-        "import sys; val = sys.stdin.readline().strip(); print(f'REPL_ECHO: {val}')",
-    ])
-    .write_stdin("leash_interactive_test\r\n")
-    .assert()
-    .success()
-    .stdout(predicate::str::contains(
-        "REPL_ECHO: leash_interactive_test",
-    ));
+    cmd.current_dir(temp.path())
+        .args([
+            "run",
+            "--",
+            python,
+            "-c",
+            "import sys; val = sys.stdin.readline().strip(); print(f'REPL_ECHO: {val}')",
+        ])
+        .write_stdin("leash_interactive_test\r\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "REPL_ECHO: leash_interactive_test",
+        ));
 }
 
 #[test]
 fn test_run_python_repl() {
+    let temp = tempdir().unwrap();
+    init_git_repo(temp.path());
+
     let python = if cfg!(windows) { "python" } else { "python3" };
     let mut cmd = Command::cargo_bin("leash").unwrap();
-    cmd.args(["run", "--", python])
+    cmd.current_dir(temp.path())
+        .args(["run", "--", python])
         .write_stdin("x = 100 + 234\r\nprint(f'CALC_RESULT={x}')\r\nexit()\r\n")
         .assert()
         .success()
@@ -147,9 +180,13 @@ fn test_run_python_repl() {
 
 #[test]
 fn test_run_propagates_non_zero_exit_code() {
+    let temp = tempdir().unwrap();
+    init_git_repo(temp.path());
+
     let shell = if cfg!(windows) { "sh" } else { "bash" };
     let mut cmd = Command::cargo_bin("leash").unwrap();
-    cmd.args(["run", "--", shell, "-c", "exit 42"])
+    cmd.current_dir(temp.path())
+        .args(["run", "--", shell, "-c", "exit 42"])
         .assert()
         .code(42);
 }
@@ -158,25 +195,7 @@ fn test_run_propagates_non_zero_exit_code() {
 fn test_cli_checkpoints_and_rewind() {
     let temp = tempdir().unwrap();
 
-    // Initialize git repository using system git
-    let run_git = |args: &[&str]| {
-        let status = std::process::Command::new("git")
-            .args(args)
-            .current_dir(temp.path())
-            .status()
-            .expect("Failed to execute git command");
-        assert!(status.success());
-    };
-
-    run_git(&["init"]);
-    run_git(&["config", "user.name", "CLI Tester"]);
-    run_git(&["config", "user.email", "clitester@example.com"]);
-    run_git(&["config", "core.autocrlf", "false"]);
-
-    let initial_file = temp.path().join("init.txt");
-    std::fs::write(&initial_file, "init\n").unwrap();
-    run_git(&["add", "init.txt"]);
-    run_git(&["commit", "-m", "init commit"]);
+    init_git_repo(temp.path());
 
     // Initialize leash
     let mut init_cmd = Command::cargo_bin("leash").unwrap();
@@ -278,4 +297,100 @@ fn test_commands_outside_git_repo_show_clean_error() {
         .stderr(predicate::str::contains(
             "[LEASH ERROR] Leash requires a git repository. Run 'git init' first.",
         ));
+}
+
+#[test]
+fn test_cli_log_empty() {
+    let temp = tempdir().unwrap();
+    let mut cmd = Command::cargo_bin("leash").unwrap();
+    cmd.current_dir(temp.path())
+        .arg("log")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No session log entries found."));
+}
+
+#[test]
+fn test_cli_log_after_run_and_rewind() {
+    let temp = tempdir().unwrap();
+    init_git_repo(temp.path());
+
+    // Run a command
+    let mut run_cmd = Command::cargo_bin("leash").unwrap();
+    run_cmd
+        .current_dir(temp.path())
+        .args(["run", "--", "echo", "log_test_command"])
+        .assert()
+        .success();
+
+    // Verify .leash/log.jsonl was created
+    let log_file = temp.path().join(".leash").join("log.jsonl");
+    assert!(log_file.exists(), ".leash/log.jsonl should be created");
+
+    // Test leash log (human-readable table)
+    let mut log_cmd = Command::cargo_bin("leash").unwrap();
+    let log_output = log_cmd
+        .current_dir(temp.path())
+        .arg("log")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let log_str = String::from_utf8_lossy(&log_output);
+    assert!(log_str.contains("START"));
+    assert!(log_str.contains("log_test_command"));
+    assert!(log_str.contains("POLICY"));
+    assert!(log_str.contains("allow"));
+    assert!(log_str.contains("CHECKPOINT"));
+    assert!(log_str.contains("END"));
+    assert!(log_str.contains("exit code: 0"));
+
+    // Test leash log --json
+    let mut json_cmd = Command::cargo_bin("leash").unwrap();
+    json_cmd
+        .current_dir(temp.path())
+        .args(["log", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"event\":\"session_started\""))
+        .stdout(predicate::str::contains("\"event\":\"command_evaluated\""))
+        .stdout(predicate::str::contains("\"event\":\"checkpoint_created\""))
+        .stdout(predicate::str::contains("\"event\":\"session_ended\""));
+
+    // Get checkpoint id from checkpoints list
+    let mut cp_cmd = Command::cargo_bin("leash").unwrap();
+    let cp_output = cp_cmd
+        .current_dir(temp.path())
+        .arg("checkpoints")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let cp_str = String::from_utf8_lossy(&cp_output);
+    let cp_line = cp_str
+        .lines()
+        .find(|l| l.contains("before: echo log_test_command"))
+        .expect("Checkpoint line not found");
+    let cp_id = cp_line.split_whitespace().next().unwrap();
+
+    // Perform rewind
+    let mut rw_cmd = Command::cargo_bin("leash").unwrap();
+    rw_cmd
+        .current_dir(temp.path())
+        .args(["rewind", cp_id, "--yes"])
+        .assert()
+        .success();
+
+    // Verify rewind was recorded in log and tail works
+    let mut tail_cmd = Command::cargo_bin("leash").unwrap();
+    tail_cmd
+        .current_dir(temp.path())
+        .args(["log", "-n", "1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("REWIND"))
+        .stdout(predicate::str::contains("restored to"));
 }

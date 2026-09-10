@@ -1,11 +1,13 @@
 use anyhow::Result;
+use chrono::Utc;
 use clap::Parser;
 use leash::checkpoint::GitCheckpointBackend;
 use leash::cli::{Cli, Commands};
 use leash::config;
 use leash::policy::{PolicyAction, PolicyEngine};
+use leash::session_log::{SessionEvent, SessionLogger};
 use std::io::{IsTerminal, Write};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 use tracing_subscriber::EnvFilter;
 
 fn generate_session_id() -> String {
@@ -32,17 +34,66 @@ async fn main() -> Result<()> {
                 println!("Initialized Leash configuration at {}", path.display());
             }
             Err(e) => {
-                eprintln!("Error initializing Leash: {}", e);
+                eprintln!("[LEASH ERROR] Failed to initialize Leash: {}", e);
                 std::process::exit(1);
             }
         },
         Commands::Run(args) => {
+            let session_id = generate_session_id();
             let full_command = args.command.join(" ");
+            let start_instant = Instant::now();
+
+            let leash_dir =
+                config::find_leash_dir().unwrap_or_else(|_| std::path::PathBuf::from(".leash"));
+            let logger = SessionLogger::new(&leash_dir);
+
+            // Record session start event
+            let _ = logger.log_event(&SessionEvent::SessionStarted {
+                timestamp: Utc::now(),
+                session_id: session_id.clone(),
+                command: full_command.clone(),
+            });
 
             // Load and evaluate policy
-            let policy_config = config::load_active_policy()?;
-            let engine = PolicyEngine::new(policy_config)?;
+            let policy_config = match config::load_active_policy() {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    eprintln!("[LEASH ERROR] Failed to load policy: {}", e);
+                    let _ = logger.log_event(&SessionEvent::SessionEnded {
+                        timestamp: Utc::now(),
+                        session_id: session_id.clone(),
+                        exit_code: Some(1),
+                        duration_ms: Some(start_instant.elapsed().as_millis() as u64),
+                    });
+                    std::process::exit(1);
+                }
+            };
+
+            let engine = match PolicyEngine::new(policy_config) {
+                Ok(eng) => eng,
+                Err(e) => {
+                    eprintln!("[LEASH ERROR] Invalid policy configuration: {}", e);
+                    let _ = logger.log_event(&SessionEvent::SessionEnded {
+                        timestamp: Utc::now(),
+                        session_id: session_id.clone(),
+                        exit_code: Some(1),
+                        duration_ms: Some(start_instant.elapsed().as_millis() as u64),
+                    });
+                    std::process::exit(1);
+                }
+            };
+
             let eval = engine.evaluate(&full_command);
+
+            // Record policy evaluation event
+            let _ = logger.log_event(&SessionEvent::CommandEvaluated {
+                timestamp: Utc::now(),
+                session_id: session_id.clone(),
+                command: full_command.clone(),
+                policy_action: eval.action.to_string(),
+                matched_rule: eval.matched_rule.clone(),
+                reason: eval.reason.clone(),
+            });
 
             match eval.action {
                 PolicyAction::Deny => {
@@ -54,6 +105,12 @@ async fn main() -> Result<()> {
                         eprintln!("Reason: {}", reason);
                     }
                     eprintln!("Command: {}", full_command);
+                    let _ = logger.log_event(&SessionEvent::SessionEnded {
+                        timestamp: Utc::now(),
+                        session_id: session_id.clone(),
+                        exit_code: Some(126),
+                        duration_ms: Some(start_instant.elapsed().as_millis() as u64),
+                    });
                     std::process::exit(126);
                 }
                 PolicyAction::Ask => {
@@ -73,6 +130,12 @@ async fn main() -> Result<()> {
                         eprintln!(
                             "[LEASH BLOCKED] Non-interactive session detected; treating 'ask' policy as deny."
                         );
+                        let _ = logger.log_event(&SessionEvent::SessionEnded {
+                            timestamp: Utc::now(),
+                            session_id: session_id.clone(),
+                            exit_code: Some(126),
+                            duration_ms: Some(start_instant.elapsed().as_millis() as u64),
+                        });
                         std::process::exit(126);
                     }
 
@@ -83,11 +146,23 @@ async fn main() -> Result<()> {
                     let bytes_read = std::io::stdin().read_line(&mut response)?;
                     if bytes_read == 0 {
                         eprintln!("[LEASH ABORTED] EOF encountered on input; aborting.");
+                        let _ = logger.log_event(&SessionEvent::SessionEnded {
+                            timestamp: Utc::now(),
+                            session_id: session_id.clone(),
+                            exit_code: Some(1),
+                            duration_ms: Some(start_instant.elapsed().as_millis() as u64),
+                        });
                         std::process::exit(1);
                     }
                     let trimmed = response.trim().to_lowercase();
                     if trimmed != "y" && trimmed != "yes" {
                         eprintln!("[LEASH ABORTED] Command execution cancelled by user.");
+                        let _ = logger.log_event(&SessionEvent::SessionEnded {
+                            timestamp: Utc::now(),
+                            session_id: session_id.clone(),
+                            exit_code: Some(1),
+                            duration_ms: Some(start_instant.elapsed().as_millis() as u64),
+                        });
                         std::process::exit(1);
                     }
                 }
@@ -101,23 +176,54 @@ async fn main() -> Result<()> {
                     eprintln!(
                         "[LEASH ERROR] Leash requires a git repository. Run 'git init' first."
                     );
+                    let _ = logger.log_event(&SessionEvent::SessionEnded {
+                        timestamp: Utc::now(),
+                        session_id: session_id.clone(),
+                        exit_code: Some(1),
+                        duration_ms: Some(start_instant.elapsed().as_millis() as u64),
+                    });
                     std::process::exit(1);
                 }
             };
 
             // Create pre-execution checkpoint
-            let session_id = generate_session_id();
             let desc = format!("before: {}", full_command);
             match backend.create_checkpoint(&session_id, &desc) {
                 Ok(cp) => {
                     eprintln!("[LEASH] Created pre-execution checkpoint {}", cp.id);
+                    let _ = logger.log_event(&SessionEvent::CheckpointCreated {
+                        timestamp: Utc::now(),
+                        session_id: session_id.clone(),
+                        checkpoint_id: cp.id,
+                        description: desc,
+                    });
                 }
                 Err(e) => {
                     tracing::warn!("Could not create automatic checkpoint: {}", e);
                 }
             }
 
-            let result = leash::pty_wrapper::run_pty(&args.command)?;
+            let result = match leash::pty_wrapper::run_pty(&args.command) {
+                Ok(res) => res,
+                Err(e) => {
+                    eprintln!("[LEASH ERROR] Command execution failed: {}", e);
+                    let _ = logger.log_event(&SessionEvent::SessionEnded {
+                        timestamp: Utc::now(),
+                        session_id: session_id.clone(),
+                        exit_code: Some(1),
+                        duration_ms: Some(start_instant.elapsed().as_millis() as u64),
+                    });
+                    std::process::exit(1);
+                }
+            };
+
+            let _ = logger.log_event(&SessionEvent::SessionEnded {
+                timestamp: Utc::now(),
+                session_id: session_id.clone(),
+                exit_code: Some(result.exit_code),
+                duration_ms: Some(start_instant.elapsed().as_millis() as u64),
+            });
+
             std::process::exit(result.exit_code);
         }
         Commands::Checkpoints(args) => {
@@ -131,7 +237,14 @@ async fn main() -> Result<()> {
                 }
             };
 
-            let checkpoints = backend.list_checkpoints(args.session.as_deref())?;
+            let checkpoints = match backend.list_checkpoints(args.session.as_deref()) {
+                Ok(cp) => cp,
+                Err(e) => {
+                    eprintln!("[LEASH ERROR] Failed to list checkpoints: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
             if checkpoints.is_empty() {
                 println!("No checkpoints recorded.");
             } else {
@@ -198,15 +311,107 @@ async fn main() -> Result<()> {
                         "[LEASH] Successfully rewound working directory to checkpoint {} ({})",
                         cp.id, cp.description
                     );
+                    if let Ok(leash_dir) = config::find_leash_dir() {
+                        let logger = SessionLogger::new(&leash_dir);
+                        let _ = logger.log_event(&SessionEvent::RewindExecuted {
+                            timestamp: Utc::now(),
+                            session_id: Some(cp.session_id.clone()),
+                            checkpoint_id: cp.id.clone(),
+                            description: cp.description.clone(),
+                        });
+                    }
                 }
                 Err(e) => {
-                    eprintln!("Error during rewind: {}", e);
+                    eprintln!("[LEASH ERROR] Failed to restore checkpoint: {}", e);
                     std::process::exit(1);
                 }
             }
         }
-        Commands::Log(_args) => {
-            println!("leash log: not implemented yet");
+        Commands::Log(args) => {
+            let leash_dir = match config::find_leash_dir() {
+                Ok(dir) => dir,
+                Err(e) => {
+                    eprintln!("[LEASH ERROR] Failed to determine Leash directory: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            let logger = SessionLogger::new(&leash_dir);
+            let events = match logger.read_events(args.session.as_deref(), args.tail) {
+                Ok(ev) => ev,
+                Err(e) => {
+                    eprintln!("[LEASH ERROR] Failed to read session log: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            if events.is_empty() {
+                println!("No session log entries found.");
+                return Ok(());
+            }
+
+            if args.json {
+                for event in events {
+                    println!("{}", serde_json::to_string(&event)?);
+                }
+            } else {
+                println!(
+                    "{:<20} {:<10} {:<12} DETAILS",
+                    "TIMESTAMP (UTC)", "SESSION", "EVENT"
+                );
+                println!(
+                    "{:<20} {:<10} {:<12} ----------------------------------------",
+                    "-------------------", "---------", "-----------"
+                );
+                for event in events {
+                    let ts = event.timestamp().format("%Y-%m-%d %H:%M:%S").to_string();
+                    let sid = event.session_id().unwrap_or("-");
+                    let ev_type = event.event_type_name();
+                    let details = match &event {
+                        SessionEvent::SessionStarted { command, .. } => {
+                            format!("command: {}", command)
+                        }
+                        SessionEvent::CommandEvaluated {
+                            policy_action,
+                            matched_rule,
+                            reason,
+                            ..
+                        } => {
+                            let r_name = matched_rule.as_deref().unwrap_or("<default>");
+                            if let Some(r) = reason {
+                                format!("{} (rule: '{}', reason: '{}')", policy_action, r_name, r)
+                            } else {
+                                format!("{} (rule: '{}')", policy_action, r_name)
+                            }
+                        }
+                        SessionEvent::CheckpointCreated {
+                            checkpoint_id,
+                            description,
+                            ..
+                        } => format!("{} ({})", checkpoint_id, description),
+                        SessionEvent::SessionEnded {
+                            exit_code,
+                            duration_ms,
+                            ..
+                        } => {
+                            let code_str = exit_code
+                                .map(|c| c.to_string())
+                                .unwrap_or_else(|| "none".to_string());
+                            let dur_str = duration_ms
+                                .map(|d| format!(" ({}ms)", d))
+                                .unwrap_or_default();
+                            format!("exit code: {}{}", code_str, dur_str)
+                        }
+                        SessionEvent::RewindExecuted {
+                            checkpoint_id,
+                            description,
+                            ..
+                        } => format!("restored to {} ({})", checkpoint_id, description),
+                    };
+
+                    println!("{:<20} {:<10} {:<12} {}", ts, sid, ev_type, details);
+                }
+            }
         }
     }
 

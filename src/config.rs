@@ -27,9 +27,18 @@ rules:
 default_action: allow   # qué hacer si ningún patrón coincide: allow | ask | deny
 "#;
 
-/// Returns the `.leash` directory path relative to the current working directory.
+/// Returns the `.leash` directory path relative to the current working directory,
+/// or from the root of the containing git repository if it exists there.
 pub fn find_leash_dir() -> Result<PathBuf> {
     let current_dir = std::env::current_dir().context("Failed to get current directory")?;
+    if let Ok(repo) = git2::Repository::discover(&current_dir) {
+        if let Some(workdir) = repo.workdir() {
+            let root_leash = workdir.join(LEASH_DIR);
+            if root_leash.exists() {
+                return Ok(root_leash);
+            }
+        }
+    }
     let leash_dir = current_dir.join(LEASH_DIR);
     Ok(leash_dir)
 }
