@@ -1,5 +1,4 @@
 /target
-.leash/
 *.log
 *.tmp
 .DS_Store
