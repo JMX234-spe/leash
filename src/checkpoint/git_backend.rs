@@ -1,11 +1,14 @@
 //! Git backend for creating, listing, and restoring checkpoints on `refs/leash/checkpoints`.
 
-use anyhow::Result;
-use chrono::{DateTime, Utc};
+use anyhow::{Context, Result};
+use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+pub const CHECKPOINT_REF: &str = "refs/leash/checkpoints";
 
 /// Represents a recorded checkpoint.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Checkpoint {
     pub id: String,
     pub timestamp: DateTime<Utc>,
@@ -13,28 +16,226 @@ pub struct Checkpoint {
     pub description: String,
 }
 
-pub struct GitCheckpointBackend;
+pub struct GitCheckpointBackend {
+    repo_root: PathBuf,
+}
 
 impl GitCheckpointBackend {
-    pub fn new() -> Self {
-        Self
+    /// Opens the git repository containing or parent to `path`.
+    pub fn discover(path: &Path) -> Result<Self> {
+        let repo = git2::Repository::discover(path)
+            .with_context(|| format!("No git repository found at or above {}", path.display()))?;
+        let repo_root = repo
+            .workdir()
+            .context("Repository is bare (no working directory)")?
+            .to_path_buf();
+        Ok(Self { repo_root })
     }
 
-    pub fn create_checkpoint(&self, _session_id: &str, _description: &str) -> Result<Checkpoint> {
-        anyhow::bail!("Checkpoint creation not implemented yet")
+    /// Discovers the git repository from current working directory.
+    pub fn open_current() -> Result<Self> {
+        let current_dir = std::env::current_dir().context("Failed to get current directory")?;
+        Self::discover(&current_dir)
     }
 
-    pub fn list_checkpoints(&self, _session_id: Option<&str>) -> Result<Vec<Checkpoint>> {
-        anyhow::bail!("Listing checkpoints not implemented yet")
+    pub fn repo_root(&self) -> &Path {
+        &self.repo_root
     }
 
-    pub fn restore_checkpoint(&self, _checkpoint_id: &str) -> Result<()> {
-        anyhow::bail!("Checkpoint restore not implemented yet")
+    /// Creates a checkpoint capturing the entire current working tree.
+    ///
+    /// The checkpoint is saved as a commit in the hidden reference `refs/leash/checkpoints`.
+    /// The user's active branch and HEAD are completely untouched.
+    pub fn create_checkpoint(&self, session_id: &str, description: &str) -> Result<Checkpoint> {
+        let repo = git2::Repository::open(&self.repo_root)
+            .context("Failed to open git repository for checkpoint")?;
+
+        // Prepare in-memory index covering all files in workdir
+        let mut index = repo.index().context("Failed to get repository index")?;
+
+        // Update any tracked files that were modified or removed
+        let _ = index.update_all(["*"].iter(), None);
+        // Add all files including new untracked files (respecting .gitignore)
+        index
+            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+            .context("Failed to add working directory files to index")?;
+
+        let tree_id = index
+            .write_tree_to(&repo)
+            .context("Failed to write checkpoint tree object")?;
+        let tree = repo
+            .find_tree(tree_id)
+            .context("Failed to locate written tree")?;
+
+        let timestamp = Utc::now();
+        let commit_message = format!(
+            "leash: {}\n\nsession_id: {}\ntimestamp: {}\ndescription: {}\n",
+            description,
+            session_id,
+            timestamp.to_rfc3339(),
+            description
+        );
+
+        let signature = repo
+            .signature()
+            .unwrap_or_else(|_| git2::Signature::now("Leash", "leash@local").unwrap());
+
+        // Check if refs/leash/checkpoints already exists
+        let parent_commit = match repo.find_reference(CHECKPOINT_REF) {
+            Ok(reference) => {
+                let peeled = reference.peel_to_commit().ok();
+                peeled
+            }
+            Err(_) => None,
+        };
+
+        let parents: Vec<&git2::Commit> = match &parent_commit {
+            Some(parent) => vec![parent],
+            None => Vec::new(),
+        };
+
+        let commit_id = repo
+            .commit(
+                Some(CHECKPOINT_REF),
+                &signature,
+                &signature,
+                &commit_message,
+                &tree,
+                &parents,
+            )
+            .context("Failed to create checkpoint commit")?;
+
+        let short_id = format!("{:.7}", commit_id);
+
+        Ok(Checkpoint {
+            id: short_id,
+            timestamp,
+            session_id: session_id.to_string(),
+            description: description.to_string(),
+        })
+    }
+
+    /// Lists recorded checkpoints on `refs/leash/checkpoints`, optionally filtered by `session_id`.
+    pub fn list_checkpoints(&self, session_id_filter: Option<&str>) -> Result<Vec<Checkpoint>> {
+        let repo =
+            git2::Repository::open(&self.repo_root).context("Failed to open git repository")?;
+
+        let reference = match repo.find_reference(CHECKPOINT_REF) {
+            Ok(r) => r,
+            Err(_) => return Ok(Vec::new()), // No checkpoints yet
+        };
+
+        let head_commit = reference
+            .peel_to_commit()
+            .context("Failed to peel checkpoint ref to commit")?;
+
+        let mut revwalk = repo.revwalk().context("Failed to create revwalk")?;
+        revwalk
+            .push(head_commit.id())
+            .context("Failed to push checkpoint commit to revwalk")?;
+        revwalk.set_sorting(git2::Sort::TIME)?;
+
+        let mut checkpoints = Vec::new();
+
+        for oid_res in revwalk {
+            let oid = oid_res.context("Failed to get commit OID in revwalk")?;
+            let commit = repo.find_commit(oid).context("Failed to find commit")?;
+            let short_id = format!("{:.7}", oid);
+
+            let msg = commit.message().unwrap_or_default();
+            let parsed = parse_commit_message(&short_id, &commit, msg);
+
+            if let Some(filter) = session_id_filter {
+                if parsed.session_id != filter {
+                    continue;
+                }
+            }
+
+            checkpoints.push(parsed);
+        }
+
+        Ok(checkpoints)
+    }
+
+    /// Restores the working tree and index to the exact state of `checkpoint_id`.
+    ///
+    /// The user's current branch reference and HEAD remain unchanged.
+    pub fn restore_checkpoint(&self, checkpoint_id: &str) -> Result<Checkpoint> {
+        let repo =
+            git2::Repository::open(&self.repo_root).context("Failed to open git repository")?;
+
+        let obj = repo
+            .revparse_single(checkpoint_id)
+            .with_context(|| format!("Checkpoint '{}' not found", checkpoint_id))?;
+
+        let commit = obj
+            .peel_to_commit()
+            .with_context(|| format!("Object '{}' is not a commit", checkpoint_id))?;
+
+        let tree = commit
+            .tree()
+            .context("Failed to get tree from checkpoint commit")?;
+
+        let short_id = format!("{:.7}", commit.id());
+        let msg = commit.message().unwrap_or_default();
+        let checkpoint_info = parse_commit_message(&short_id, &commit, msg);
+
+        // Checkout tree with force and remove untracked to restore working tree
+        let mut checkout = git2::build::CheckoutBuilder::new();
+        checkout.force();
+        checkout.remove_untracked(true);
+
+        repo.checkout_tree(tree.as_object(), Some(&mut checkout))
+            .context("Failed to checkout checkpoint tree into working directory")?;
+
+        // Synchronize repository index with the restored tree without moving HEAD
+        let mut index = repo.index().context("Failed to open index")?;
+        index
+            .read_tree(&tree)
+            .context("Failed to read tree into index")?;
+        index.write().context("Failed to write index")?;
+
+        Ok(checkpoint_info)
     }
 }
 
-impl Default for GitCheckpointBackend {
-    fn default() -> Self {
-        Self::new()
+fn parse_commit_message(short_id: &str, commit: &git2::Commit, message: &str) -> Checkpoint {
+    let mut session_id = String::new();
+    let mut timestamp: Option<DateTime<Utc>> = None;
+    let mut description = String::new();
+
+    for line in message.lines() {
+        let trimmed = line.trim();
+        if let Some(val) = trimmed.strip_prefix("session_id:") {
+            session_id = val.trim().to_string();
+        } else if let Some(val) = trimmed.strip_prefix("timestamp:") {
+            if let Ok(dt) = DateTime::parse_from_rfc3339(val.trim()) {
+                timestamp = Some(dt.with_timezone(&Utc));
+            }
+        } else if let Some(val) = trimmed.strip_prefix("description:") {
+            description = val.trim().to_string();
+        }
+    }
+
+    if session_id.is_empty() {
+        session_id = "unknown".to_string();
+    }
+
+    let timestamp = timestamp.unwrap_or_else(|| {
+        let seconds = commit.time().seconds();
+        Utc.timestamp_opt(seconds, 0)
+            .single()
+            .unwrap_or_else(Utc::now)
+    });
+
+    if description.is_empty() {
+        description = commit.summary().unwrap_or("checkpoint").to_string();
+    }
+
+    Checkpoint {
+        id: short_id.to_string(),
+        timestamp,
+        session_id,
+        description,
     }
 }

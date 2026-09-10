@@ -1,10 +1,19 @@
 use anyhow::Result;
 use clap::Parser;
+use leash::checkpoint::GitCheckpointBackend;
 use leash::cli::{Cli, Commands};
 use leash::config;
 use leash::policy::{PolicyAction, PolicyEngine};
 use std::io::{IsTerminal, Write};
+use std::time::SystemTime;
 use tracing_subscriber::EnvFilter;
+
+fn generate_session_id() -> String {
+    let duration = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{:08x}", duration.as_millis() as u64 & 0xffffffff)
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -85,17 +94,103 @@ async fn main() -> Result<()> {
                 PolicyAction::Allow => {}
             }
 
+            // Create pre-execution checkpoint if inside a git repository
+            let session_id = generate_session_id();
+            if let Ok(backend) = GitCheckpointBackend::open_current() {
+                let desc = format!("before: {}", full_command);
+                match backend.create_checkpoint(&session_id, &desc) {
+                    Ok(cp) => {
+                        eprintln!("[LEASH] Created pre-execution checkpoint {}", cp.id);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Could not create automatic checkpoint: {}", e);
+                    }
+                }
+            }
+
             let result = leash::pty_wrapper::run_pty(&args.command)?;
             std::process::exit(result.exit_code);
         }
-        Commands::Checkpoints(_args) => {
-            println!("leash checkpoints: not implemented yet");
+        Commands::Checkpoints(args) => {
+            let backend = match GitCheckpointBackend::open_current() {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            let checkpoints = backend.list_checkpoints(args.session.as_deref())?;
+            if checkpoints.is_empty() {
+                println!("No checkpoints recorded.");
+            } else {
+                println!(
+                    "{:<10} {:<10} {:<25} DESCRIPTION",
+                    "ID", "SESSION", "TIMESTAMP"
+                );
+                println!(
+                    "{:<10} {:<10} {:<25} -----------",
+                    "-------", "-------", "-------------------------"
+                );
+                for cp in checkpoints {
+                    println!(
+                        "{:<10} {:<10} {:<25} {}",
+                        cp.id,
+                        cp.session_id,
+                        cp.timestamp.format("%Y-%m-%d %H:%M:%S UTC"),
+                        cp.description
+                    );
+                }
+            }
         }
         Commands::Rewind(args) => {
-            println!(
-                "leash rewind: not implemented yet. Checkpoint: {}",
-                args.checkpoint_id
-            );
+            let backend = match GitCheckpointBackend::open_current() {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            if !args.yes {
+                if !std::io::stdin().is_terminal() {
+                    eprintln!(
+                        "[LEASH ERROR] Cannot prompt for confirmation in non-interactive mode. Use --yes to confirm rewind."
+                    );
+                    std::process::exit(1);
+                }
+
+                eprint!(
+                    "Are you sure you want to rewind working directory to checkpoint '{}'?\nAny uncommitted changes will be replaced. [y/N]: ",
+                    args.checkpoint_id
+                );
+                std::io::stderr().flush()?;
+
+                let mut response = String::new();
+                let bytes_read = std::io::stdin().read_line(&mut response)?;
+                if bytes_read == 0 {
+                    eprintln!("[LEASH ABORTED] EOF encountered on input; aborting.");
+                    std::process::exit(1);
+                }
+                let trimmed = response.trim().to_lowercase();
+                if trimmed != "y" && trimmed != "yes" {
+                    eprintln!("[LEASH ABORTED] Rewind cancelled by user.");
+                    std::process::exit(1);
+                }
+            }
+
+            match backend.restore_checkpoint(&args.checkpoint_id) {
+                Ok(cp) => {
+                    println!(
+                        "[LEASH] Successfully rewound working directory to checkpoint {} ({})",
+                        cp.id, cp.description
+                    );
+                }
+                Err(e) => {
+                    eprintln!("Error during rewind: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
         Commands::Log(_args) => {
             println!("leash log: not implemented yet");
