@@ -1,5 +1,6 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
+use tempfile::tempdir;
 
 #[test]
 fn test_cli_help_displays_subcommands() {
@@ -24,12 +25,82 @@ fn test_cli_version() {
 }
 
 #[test]
-fn test_init_stub() {
+fn test_init_creates_policy_file() {
+    let temp_dir = tempdir().unwrap();
+
+    // First init should succeed
     let mut cmd = Command::cargo_bin("leash").unwrap();
-    cmd.arg("init")
+    cmd.current_dir(temp_dir.path())
+        .arg("init")
         .assert()
         .success()
-        .stdout(predicate::str::contains("leash init: not implemented yet"));
+        .stdout(predicate::str::contains("Initialized Leash configuration"));
+
+    let policy_path = temp_dir.path().join(".leash").join("policy.yaml");
+    assert!(policy_path.exists());
+    let content = std::fs::read_to_string(&policy_path).unwrap();
+    assert!(content.contains("block-destructive-rm"));
+
+    // Second init without --force should fail with exit code 1
+    let mut cmd2 = Command::cargo_bin("leash").unwrap();
+    cmd2.current_dir(temp_dir.path())
+        .arg("init")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already exists"));
+
+    // Init with --force should succeed
+    let mut cmd3 = Command::cargo_bin("leash").unwrap();
+    cmd3.current_dir(temp_dir.path())
+        .args(["init", "--force"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_run_denied_command_blocked() {
+    let temp_dir = tempdir().unwrap();
+
+    // Initialize policy
+    let mut init_cmd = Command::cargo_bin("leash").unwrap();
+    init_cmd
+        .current_dir(temp_dir.path())
+        .arg("init")
+        .assert()
+        .success();
+
+    // Command matching deny rule
+    let mut run_cmd = Command::cargo_bin("leash").unwrap();
+    run_cmd
+        .current_dir(temp_dir.path())
+        .args(["run", "--", "rm", "-rf", "/"])
+        .assert()
+        .code(126)
+        .stderr(predicate::str::contains("[LEASH BLOCKED]"))
+        .stderr(predicate::str::contains("block-destructive-rm"));
+}
+
+#[test]
+fn test_run_ask_command_aborted_by_user() {
+    let temp_dir = tempdir().unwrap();
+
+    let mut init_cmd = Command::cargo_bin("leash").unwrap();
+    init_cmd
+        .current_dir(temp_dir.path())
+        .arg("init")
+        .assert()
+        .success();
+
+    // Command matching ask rule, responding 'n'
+    let mut run_cmd = Command::cargo_bin("leash").unwrap();
+    run_cmd
+        .current_dir(temp_dir.path())
+        .args(["run", "--", "git", "push", "origin", "main", "--force"])
+        .write_stdin("n\r\n")
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("[LEASH PROMPT]"))
+        .stderr(predicate::str::contains("[LEASH ABORTED]"));
 }
 
 #[test]
