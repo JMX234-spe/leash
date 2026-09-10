@@ -71,3 +71,12 @@ fn test_run_python_repl() {
         .success()
         .stdout(predicate::str::contains("CALC_RESULT=334"));
 }
+
+#[test]
+fn test_run_propagates_non_zero_exit_code() {
+    let shell = if cfg!(windows) { "sh" } else { "bash" };
+    let mut cmd = Command::cargo_bin("leash").unwrap();
+    cmd.args(["run", "--", shell, "-c", "exit 42"])
+        .assert()
+        .code(42);
+}
