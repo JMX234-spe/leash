@@ -19,10 +19,8 @@ async fn main() -> Result<()> {
             println!("leash init: not implemented yet");
         }
         Commands::Run(args) => {
-            println!(
-                "leash run: not implemented yet. Command: {:?}",
-                args.command
-            );
+            let result = leash::pty_wrapper::run_pty(&args.command)?;
+            std::process::exit(result.exit_code);
         }
         Commands::Checkpoints(_args) => {
             println!("leash checkpoints: not implemented yet");

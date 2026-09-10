@@ -31,3 +31,43 @@ fn test_init_stub() {
         .success()
         .stdout(predicate::str::contains("leash init: not implemented yet"));
 }
+
+#[test]
+fn test_run_echo_hola() {
+    let shell = if cfg!(windows) { "sh" } else { "bash" };
+    let mut cmd = Command::cargo_bin("leash").unwrap();
+    cmd.args(["run", "--", shell, "-c", "echo hola"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hola"));
+}
+
+#[test]
+fn test_run_interactive_python() {
+    let python = if cfg!(windows) { "python" } else { "python3" };
+    let mut cmd = Command::cargo_bin("leash").unwrap();
+    cmd.args([
+        "run",
+        "--",
+        python,
+        "-c",
+        "import sys; val = sys.stdin.readline().strip(); print(f'REPL_ECHO: {val}')",
+    ])
+    .write_stdin("leash_interactive_test\r\n")
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(
+        "REPL_ECHO: leash_interactive_test",
+    ));
+}
+
+#[test]
+fn test_run_python_repl() {
+    let python = if cfg!(windows) { "python" } else { "python3" };
+    let mut cmd = Command::cargo_bin("leash").unwrap();
+    cmd.args(["run", "--", python])
+        .write_stdin("x = 100 + 234\r\nprint(f'CALC_RESULT={x}')\r\nexit()\r\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("CALC_RESULT=334"));
+}
