@@ -81,7 +81,7 @@ fn test_run_denied_command_blocked() {
 }
 
 #[test]
-fn test_run_ask_command_aborted_by_user() {
+fn test_run_ask_command_non_interactive_treated_as_deny() {
     let temp_dir = tempdir().unwrap();
 
     let mut init_cmd = Command::cargo_bin("leash").unwrap();
@@ -91,16 +91,18 @@ fn test_run_ask_command_aborted_by_user() {
         .assert()
         .success();
 
-    // Command matching ask rule, responding 'n'
+    // In automated runners (non-interactive stdin), 'ask' rules are treated as deny
+    // to prevent hanging pipelines.
     let mut run_cmd = Command::cargo_bin("leash").unwrap();
     run_cmd
         .current_dir(temp_dir.path())
         .args(["run", "--", "git", "push", "origin", "main", "--force"])
-        .write_stdin("n\r\n")
         .assert()
-        .code(1)
+        .code(126)
         .stderr(predicate::str::contains("[LEASH PROMPT]"))
-        .stderr(predicate::str::contains("[LEASH ABORTED]"));
+        .stderr(predicate::str::contains(
+            "Non-interactive session detected; treating 'ask' policy as deny.",
+        ));
 }
 
 #[test]

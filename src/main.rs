@@ -3,7 +3,7 @@ use clap::Parser;
 use leash::cli::{Cli, Commands};
 use leash::config;
 use leash::policy::{PolicyAction, PolicyEngine};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -56,11 +56,26 @@ async fn main() -> Result<()> {
                         eprintln!("Reason: {}", reason);
                     }
                     eprintln!("Command: {}", full_command);
+
+                    // Check if stdin is a terminal (TTY).
+                    // In non-interactive environments (CI, piped stdin without TTY),
+                    // treat 'ask' as 'deny' to avoid hanging indefinitely.
+                    if !std::io::stdin().is_terminal() {
+                        eprintln!(
+                            "[LEASH BLOCKED] Non-interactive session detected; treating 'ask' policy as deny."
+                        );
+                        std::process::exit(126);
+                    }
+
                     eprint!("Do you want to proceed? [y/N]: ");
                     std::io::stderr().flush()?;
 
                     let mut response = String::new();
-                    std::io::stdin().read_line(&mut response)?;
+                    let bytes_read = std::io::stdin().read_line(&mut response)?;
+                    if bytes_read == 0 {
+                        eprintln!("[LEASH ABORTED] EOF encountered on input; aborting.");
+                        std::process::exit(1);
+                    }
                     let trimmed = response.trim().to_lowercase();
                     if trimmed != "y" && trimmed != "yes" {
                         eprintln!("[LEASH ABORTED] Command execution cancelled by user.");
