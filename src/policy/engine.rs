@@ -26,6 +26,41 @@ pub struct EvaluationResult {
     pub reason: Option<String>,
 }
 
+/// Normalizes a command string before policy evaluation:
+/// - Strips leading and trailing whitespace
+/// - Collapses multiple spaces, tabs, and newlines into a single space
+/// - Normalizes simple flag permutations (e.g. `-r -f`, `-f -r`, `--recursive --force` -> `-rf`)
+pub fn normalize_command(command: &str) -> String {
+    let trimmed = command.trim();
+    let mut collapsed = String::with_capacity(trimmed.len());
+    let mut in_whitespace = false;
+
+    for ch in trimmed.chars() {
+        if ch.is_whitespace() {
+            if !in_whitespace {
+                collapsed.push(' ');
+                in_whitespace = true;
+            }
+        } else {
+            collapsed.push(ch);
+            in_whitespace = false;
+        }
+    }
+
+    // Normalize common flag permutations for destructive commands
+    collapsed
+        .replace("-r -f", "-rf")
+        .replace("-f -r", "-rf")
+        .replace("-R -f", "-rf")
+        .replace("-f -R", "-rf")
+        .replace("--recursive -f", "-rf")
+        .replace("-f --recursive", "-rf")
+        .replace("-r --force", "-rf")
+        .replace("--force -r", "-rf")
+        .replace("--recursive --force", "-rf")
+        .replace("--force --recursive", "-rf")
+}
+
 impl PolicyEngine {
     /// Builds a new PolicyEngine from a PolicyConfig, compiling regex patterns.
     pub fn new(config: PolicyConfig) -> Result<Self> {
@@ -43,13 +78,14 @@ impl PolicyEngine {
         })
     }
 
-    /// Evaluates a raw command string.
+    /// Evaluates a raw command string after normalization.
     ///
     /// Evaluates rules in order; the first matching rule determines the action.
     /// If no rules match, falls back to `default_action`.
     pub fn evaluate(&self, command: &str) -> EvaluationResult {
+        let normalized = normalize_command(command);
         for compiled in &self.compiled_rules {
-            if compiled.regex.is_match(command) {
+            if compiled.regex.is_match(&normalized) {
                 return EvaluationResult {
                     action: compiled.rule.action,
                     matched_rule: Some(compiled.rule.name.clone()),
@@ -63,5 +99,22 @@ impl PolicyEngine {
             matched_rule: None,
             reason: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_command_whitespace_and_flags() {
+        assert_eq!(normalize_command("  rm   -rf    /  "), "rm -rf /");
+        assert_eq!(normalize_command("rm\t-r\t-f\t/"), "rm -rf /");
+        assert_eq!(normalize_command("rm -f -r /"), "rm -rf /");
+        assert_eq!(normalize_command("rm --force --recursive /"), "rm -rf /");
+        assert_eq!(
+            normalize_command("git   push   --force"),
+            "git push --force"
+        );
     }
 }

@@ -188,3 +188,35 @@ fn test_invalid_regex_returns_error() {
     let result = PolicyEngine::new(config);
     assert!(result.is_err());
 }
+
+#[test]
+fn test_policy_normalization_prevents_flag_and_space_bypass() {
+    let config = PolicyConfig {
+        version: 1,
+        rules: vec![PolicyRule {
+            name: "block-destructive-rm".to_string(),
+            pattern: r"rm\s+-rf\s+(/|~|\.\.)".to_string(),
+            action: PolicyAction::Deny,
+            reason: Some("Destructive command".to_string()),
+        }],
+        default_action: PolicyAction::Allow,
+    };
+
+    let engine = PolicyEngine::new(config).expect("Engine initialization failed");
+
+    // Multiple spaces
+    let r1 = engine.evaluate("rm    -rf     /");
+    assert_eq!(r1.action, PolicyAction::Deny);
+
+    // Permuted flags -r -f
+    let r2 = engine.evaluate("rm -r -f /");
+    assert_eq!(r2.action, PolicyAction::Deny);
+
+    // Permuted flags -f -r
+    let r3 = engine.evaluate("rm -f -r /");
+    assert_eq!(r3.action, PolicyAction::Deny);
+
+    // Long flag variants --force --recursive
+    let r4 = engine.evaluate("rm --force --recursive /");
+    assert_eq!(r4.action, PolicyAction::Deny);
+}

@@ -199,40 +199,59 @@ impl GitCheckpointBackend {
         let msg = commit.message().unwrap_or_default();
         let checkpoint_info = parse_commit_message(&short_id, &commit, msg);
 
-        // Preserve the local .leash directory (audit logs, policies) across rewind
-        let leash_dir = self.repo_root.join(".leash");
-        let temp_backup = if leash_dir.exists() {
-            let temp = tempfile::tempdir().context("Failed to create tempdir for .leash backup")?;
-            let backup_dest = temp.path().join(".leash");
-            copy_dir_all(&leash_dir, &backup_dest)
-                .context("Failed to backup .leash directory before rewind")?;
-            Some((temp, backup_dest))
-        } else {
-            None
-        };
+        // 1. Create an automatic safety checkpoint BEFORE destructive rewind
+        let pre_rewind_desc = format!("pre-rewind backup: before restoring {}", checkpoint_id);
+        let _ = self.create_checkpoint("rewind-backup", &pre_rewind_desc)?;
 
-        // Checkout tree with force and remove untracked to restore working tree
+        // 2. Preserve .leash via local .leash.bak (not an ephemeral /tmp directory)
+        let leash_dir = self.repo_root.join(".leash");
+        let backup_dir = self.repo_root.join(".leash.bak");
+        let had_leash = leash_dir.exists();
+
+        if had_leash {
+            if backup_dir.exists() {
+                let _ = std::fs::remove_dir_all(&backup_dir);
+            }
+            copy_dir_all(&leash_dir, &backup_dir)
+                .context("Failed to create local .leash.bak backup before rewind")?;
+        }
+
+        // 3. Configure repo in-memory ignore rule so CheckoutBuilder::remove_untracked
+        // explicitly excludes .leash and .leash.bak from being touched by git
+        let _ = repo.add_ignore_rule(".leash\n.leash/*\n.leash.bak\n.leash.bak/*\n");
+
+        // 4. Checkout tree with force and remove untracked
         let mut checkout = git2::build::CheckoutBuilder::new();
         checkout.force();
         checkout.remove_untracked(true);
 
-        repo.checkout_tree(tree.as_object(), Some(&mut checkout))
-            .context("Failed to checkout checkpoint tree into working directory")?;
-
-        // Synchronize repository index with the restored tree without moving HEAD
-        let mut index = repo.index().context("Failed to open index")?;
-        index
-            .read_tree(&tree)
-            .context("Failed to read tree into index")?;
-        index.write().context("Failed to write index")?;
-
-        // Restore .leash directory after checkout
-        if let Some((_temp_guard, backup_path)) = temp_backup {
-            if !leash_dir.exists() {
-                let _ = std::fs::create_dir_all(&leash_dir);
+        let checkout_res = repo.checkout_tree(tree.as_object(), Some(&mut checkout));
+        if let Err(e) = checkout_res {
+            if had_leash && !leash_dir.exists() && backup_dir.exists() {
+                let _ = copy_dir_all(&backup_dir, &leash_dir);
             }
-            copy_dir_all(&backup_path, &leash_dir)
-                .context("Failed to restore .leash directory after rewind")?;
+            return Err(e).context("Failed to checkout checkpoint tree into working directory");
+        }
+
+        // 5. Synchronize repository index
+        let mut index = repo.index().context("Failed to open index")?;
+        let sync_res = index.read_tree(&tree).and_then(|_| index.write());
+        if let Err(e) = sync_res {
+            if had_leash && !leash_dir.exists() && backup_dir.exists() {
+                let _ = copy_dir_all(&backup_dir, &leash_dir);
+            }
+            return Err(e).context("Failed to sync index with restored tree");
+        }
+
+        // 6. Confirm success: ensure .leash is intact, then remove .leash.bak
+        if had_leash {
+            if !leash_dir.exists() && backup_dir.exists() {
+                copy_dir_all(&backup_dir, &leash_dir)
+                    .context("Failed to restore .leash directory from local backup")?;
+            }
+            if backup_dir.exists() {
+                let _ = std::fs::remove_dir_all(&backup_dir);
+            }
         }
 
         Ok(checkpoint_info)

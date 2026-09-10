@@ -236,3 +236,96 @@ fn test_checkpoint_excludes_leash_directory() {
         "Audit log must remain append-only and not be reverted by rewind"
     );
 }
+
+#[test]
+fn test_pre_rewind_safety_checkpoint_created() {
+    let temp = tempdir().unwrap();
+    let _repo = setup_git_repo(temp.path());
+    let backend = GitCheckpointBackend::discover(temp.path()).unwrap();
+
+    let target_file = temp.path().join("code.rs");
+    fs::write(&target_file, "version 1\n").unwrap();
+    let cp1 = backend.create_checkpoint("s1", "v1 commit").unwrap();
+
+    // Modify file and take another checkpoint
+    fs::write(&target_file, "version 2 with uncommitted extra\n").unwrap();
+
+    // Now rewind to cp1
+    backend.restore_checkpoint(&cp1.id).unwrap();
+
+    // Checkpoints list must contain a pre-rewind backup checkpoint!
+    let list = backend.list_checkpoints(None).unwrap();
+    let backup_cp = list
+        .iter()
+        .find(|cp| {
+            cp.description
+                .contains("pre-rewind backup: before restoring")
+        })
+        .expect("Must have created automatic pre-rewind safety checkpoint");
+
+    assert_eq!(backup_cp.session_id, "rewind-backup");
+    assert!(backup_cp.description.contains(&cp1.id));
+}
+
+#[test]
+fn test_leash_log_survives_checkout_failure() {
+    let temp = tempdir().unwrap();
+    let _repo = setup_git_repo(temp.path());
+    let backend = GitCheckpointBackend::discover(temp.path()).unwrap();
+
+    // Create .leash with audit log
+    let leash_dir = temp.path().join(".leash");
+    fs::create_dir_all(&leash_dir).unwrap();
+    let log_file = leash_dir.join("log.jsonl");
+    fs::write(&log_file, "{\"audit\":\"vital_audit_trail_entry\"}\n").unwrap();
+
+    let test_file = temp.path().join("tracked_file.txt");
+    fs::write(&test_file, "initial content\n").unwrap();
+    let cp = backend
+        .create_checkpoint("s1", "initial checkpoint")
+        .unwrap();
+
+    // Modify test_file so checkout must overwrite it
+    fs::write(&test_file, "modified content to be overwritten\n").unwrap();
+
+    // Lock test_file exclusively so checkout_tree fails when trying to overwrite it
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        opts.share_mode(0);
+    }
+    let _locked_file = opts.open(&test_file).unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&test_file).unwrap().permissions();
+        perms.set_mode(0o400);
+        let _ = fs::set_permissions(&test_file, perms);
+        let mut dir_perms = fs::metadata(temp.path()).unwrap().permissions();
+        dir_perms.set_mode(0o555);
+        let _ = fs::set_permissions(temp.path(), dir_perms);
+    }
+
+    // Attempt rewind - checkout_tree will fail due to locked/unwriteable file
+    let err = backend.restore_checkpoint(&cp.id);
+    assert!(err.is_err(), "Checkout must fail due to locked file");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut dir_perms = fs::metadata(temp.path()).unwrap().permissions();
+        dir_perms.set_mode(0o755);
+        let _ = fs::set_permissions(temp.path(), dir_perms);
+    }
+
+    // Verify .leash/log.jsonl survived 100% intact!
+    assert!(
+        log_file.exists(),
+        "Audit log must survive even when restore fails"
+    );
+    let content = fs::read_to_string(&log_file).unwrap();
+    assert_eq!(content, "{\"audit\":\"vital_audit_trail_entry\"}\n");
+}

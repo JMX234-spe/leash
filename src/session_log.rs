@@ -77,6 +77,99 @@ impl SessionEvent {
             Self::RewindExecuted { .. } => "REWIND",
         }
     }
+
+    /// Returns a sanitized copy of the event with credentials and secrets redacted.
+    pub fn sanitize(&self) -> Self {
+        match self {
+            Self::SessionStarted {
+                timestamp,
+                session_id,
+                command,
+            } => Self::SessionStarted {
+                timestamp: *timestamp,
+                session_id: session_id.clone(),
+                command: sanitize_text(command),
+            },
+            Self::CommandEvaluated {
+                timestamp,
+                session_id,
+                command,
+                policy_action,
+                matched_rule,
+                reason,
+            } => Self::CommandEvaluated {
+                timestamp: *timestamp,
+                session_id: session_id.clone(),
+                command: sanitize_text(command),
+                policy_action: policy_action.clone(),
+                matched_rule: matched_rule.clone(),
+                reason: reason.as_ref().map(|r| sanitize_text(r)),
+            },
+            Self::CheckpointCreated {
+                timestamp,
+                session_id,
+                checkpoint_id,
+                description,
+            } => Self::CheckpointCreated {
+                timestamp: *timestamp,
+                session_id: session_id.clone(),
+                checkpoint_id: checkpoint_id.clone(),
+                description: sanitize_text(description),
+            },
+            Self::SessionEnded {
+                timestamp,
+                session_id,
+                exit_code,
+                duration_ms,
+            } => Self::SessionEnded {
+                timestamp: *timestamp,
+                session_id: session_id.clone(),
+                exit_code: *exit_code,
+                duration_ms: *duration_ms,
+            },
+            Self::RewindExecuted {
+                timestamp,
+                session_id,
+                checkpoint_id,
+                description,
+            } => Self::RewindExecuted {
+                timestamp: *timestamp,
+                session_id: session_id.clone(),
+                checkpoint_id: checkpoint_id.clone(),
+                description: sanitize_text(description),
+            },
+        }
+    }
+}
+
+/// Sanitizes sensitive tokens, credentials, and API keys from logged strings.
+pub fn sanitize_text(input: &str) -> String {
+    use regex::Regex;
+    use std::sync::OnceLock;
+
+    static SK_REGEX: OnceLock<Regex> = OnceLock::new();
+    static GHP_REGEX: OnceLock<Regex> = OnceLock::new();
+    static BEARER_REGEX: OnceLock<Regex> = OnceLock::new();
+    static PASSWORD_FLAG_REGEX: OnceLock<Regex> = OnceLock::new();
+    static SHORT_P_FLAG_REGEX: OnceLock<Regex> = OnceLock::new();
+
+    let sk_re = SK_REGEX.get_or_init(|| Regex::new(r"sk-[a-zA-Z0-9_\-]{8,}").unwrap());
+    let ghp_re = GHP_REGEX.get_or_init(|| {
+        Regex::new(r"gh[pousr]_[a-zA-Z0-9]{10,}|github_pat_[a-zA-Z0-9_]{10,}").unwrap()
+    });
+    let bearer_re = BEARER_REGEX
+        .get_or_init(|| Regex::new(r#"(?i)(authorization:\s*bearer\s+)[^\s"'\\]+"#).unwrap());
+    let pwd_re = PASSWORD_FLAG_REGEX
+        .get_or_init(|| Regex::new(r#"(?i)(--password(?:=|\s+))[^\s"'\\]+"#).unwrap());
+    let short_p_re = SHORT_P_FLAG_REGEX
+        .get_or_init(|| Regex::new(r#"(?:^|\s)(-p(?:=|\s+))[^\s"'\\]+"#).unwrap());
+
+    let s1 = sk_re.replace_all(input, "[REDACTED]");
+    let s2 = ghp_re.replace_all(&s1, "[REDACTED]");
+    let s3 = bearer_re.replace_all(&s2, "${1}[REDACTED]");
+    let s4 = pwd_re.replace_all(&s3, "${1}[REDACTED]");
+    let s5 = short_p_re.replace_all(&s4, " $1[REDACTED]");
+    s5.trim().to_string()
 }
 
 pub struct SessionLogger {
@@ -104,7 +197,8 @@ impl SessionLogger {
             .with_context(|| format!("Failed to open log file at {}", self.log_path.display()))?;
 
         let mut writer = BufWriter::new(file);
-        serde_json::to_writer(&mut writer, event)
+        let sanitized = event.sanitize();
+        serde_json::to_writer(&mut writer, &sanitized)
             .with_context(|| "Failed to serialize session event to JSON")?;
         writer.write_all(b"\n")?;
         writer.flush()?;
@@ -269,5 +363,50 @@ mod tests {
         let tail_a = logger.read_events(Some("sess-A"), Some(1)).unwrap();
         assert_eq!(tail_a.len(), 1);
         assert_eq!(tail_a[0], e3);
+    }
+
+    #[test]
+    fn test_secret_sanitization_patterns() {
+        assert_eq!(
+            sanitize_text("curl -H 'Authorization: Bearer my_secret_token_123' https://api.com"),
+            "curl -H 'Authorization: Bearer [REDACTED]' https://api.com"
+        );
+        assert_eq!(
+            sanitize_text("claude --api-key sk-ant-api03-abcdef1234567890_xyz"),
+            "claude --api-key [REDACTED]"
+        );
+        assert_eq!(
+            sanitize_text("git clone https://ghp_1234567890abcdefghij@github.com/repo.git"),
+            "git clone https://[REDACTED]@github.com/repo.git"
+        );
+        assert_eq!(
+            sanitize_text("mysql -u root --password my_secret_pass -h db"),
+            "mysql -u root --password [REDACTED] -h db"
+        );
+        assert_eq!(
+            sanitize_text("docker login -u admin -p supersecret123"),
+            "docker login -u admin -p [REDACTED]"
+        );
+
+        // Verify end-to-end logging sanitization
+        let temp = tempdir().unwrap();
+        let logger = SessionLogger::new(temp.path());
+        let event = SessionEvent::SessionStarted {
+            timestamp: Utc::now(),
+            session_id: "sec-01".to_string(),
+            command: "curl -H 'Authorization: Bearer sk-ant-1234567890' --password mysecret"
+                .to_string(),
+        };
+
+        logger.log_event(&event).unwrap();
+        let read = logger.read_events(None, None).unwrap();
+        assert_eq!(read.len(), 1);
+        if let SessionEvent::SessionStarted { command, .. } = &read[0] {
+            assert!(!command.contains("sk-ant-1234567890"));
+            assert!(!command.contains("mysecret"));
+            assert!(command.contains("[REDACTED]"));
+        } else {
+            panic!("Unexpected event type");
+        }
     }
 }
