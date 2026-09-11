@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Declarative Policy Engine**: Regex-based policy evaluation configured via `.leash/policy.yaml` with top-down rule evaluation and actions (`allow`, `ask`, `deny`).
 - **Command Normalization**: Whitespace collapse and destructive flag normalization (e.g. `-r -f`, `--force --recursive` normalized to `-rf`) to prevent naive pattern bypasses.
 - **Non-Interactive CI Guard**: Automatic promotion of `ask` rules to `deny` (exit code `126`) when running in headless environments without an interactive TTY.
-- **Git Checkpoint Backend**: High-performance snapshot engine using `git2`, storing working tree states in hidden references (`refs/leash/checkpoints`) without disturbing active branches or `HEAD`.
+- **Git Checkpoint Backend**: Snapshot engine using `git2`, storing working tree states in hidden references (`refs/leash/checkpoints`) without disturbing active branches or `HEAD`.
 - **Pre-execution Safeguards**: Automatic detection of unborn branches and non-git directories with actionable error messages.
 - **Transactional Rewind**: Repository rollback with forced tree checkout, untracked file removal, automatic pre-rewind safety snapshots, and atomic `.leash.bak` backup protection.
 - **Structured Audit Logging**: Local event logging in `.leash/log.jsonl` recording session lifecycle, policy evaluations, checkpoints, and rewinds.

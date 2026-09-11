@@ -1,6 +1,6 @@
 # Contributing to Leash
 
-Thank you for your interest in contributing to Leash. This document outlines guidelines and workflows for contributing code, tests, and documentation.
+Guidelines for development setup, testing, code style, and submitting pull requests.
 
 ## Development Setup
 

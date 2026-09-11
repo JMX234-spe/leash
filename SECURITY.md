@@ -11,7 +11,7 @@ Only the latest release receives security updates.
 
 ## Security Model and Scope
 
-Leash is designed as an application-level CLI wrapper and checkpoint engine to protect against accidental damage, unexpected file mutations, and rogue commands issued by automated coding agents.
+Leash is an application-level CLI wrapper and git-based checkpoint engine. It provides regex-based command policy enforcement and repository rollback for local development environments.
 
 ### What Leash Is
 - A transparent PTY wrapper that evaluates top-level CLI commands against declarative regex patterns in `.leash/policy.yaml`.
@@ -27,7 +27,7 @@ If your use case requires untrusted multi-tenant code isolation or isolation aga
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability within Leash itself (e.g., privilege escalation, local data corruption during checkpoint/rewind, memory safety bugs in native extensions, or insecure credential leakage):
+If you discover a security vulnerability in Leash (such as repository corruption during checkpoint/rewind, credential leaks in audit logs, or unexpected privilege behavior):
 
 1. **Do not disclose publicly**: Please avoid opening public issues or pull requests.
 2. **Private Disclosure**: Report the issue privately via [GitHub Security Advisories](https://github.com/JMX234-spe/leash/security/advisories/new).
@@ -38,6 +38,6 @@ If you discover a security vulnerability within Leash itself (e.g., privilege es
    - Potential impact and suggested mitigations if available.
 
 ### Response Process
-- We aim to acknowledge receipt of security reports within 48 hours.
+- Reports are reviewed and acknowledged directly through GitHub Security Advisories.
 - A private tracking branch will be used to investigate and patch the issue.
 - Once a fix is verified and released, a public security advisory will be published crediting the reporter.

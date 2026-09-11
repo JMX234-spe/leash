@@ -13,9 +13,7 @@ Fixes #
 - Change 1
 - Change 2
 
-## Verification Checklist
-
-Please verify that your pull request satisfies all of the following:
+## Checklist
 
 - [ ] Code compiles cleanly (`cargo build`)
 - [ ] Full test suite passes (`cargo test`)

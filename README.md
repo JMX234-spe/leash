@@ -3,7 +3,7 @@
 [![CI](https://github.com/JMX234-spe/leash/actions/workflows/ci.yml/badge.svg)](https://github.com/JMX234-spe/leash/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Leash wraps arbitrary CLI-based coding agents via a pseudo-terminal (PTY), evaluates declarative security policies, logs structured JSONL audit events locally, and creates automatic git-based checkpoints for instant rollback. Nothing leaves your machine.
+Leash wraps CLI-based coding agents in a pseudo-terminal (PTY), evaluates declarative security policies, records local JSONL audit logs, and creates automatic git checkpoints for instant rollback. Runs locally with zero telemetry or network calls.
 
 <!-- TODO: Record animated demo (asciinema / GIF) when CLI interface stabilizes -->
 
