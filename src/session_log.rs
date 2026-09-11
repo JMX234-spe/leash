@@ -143,6 +143,10 @@ impl SessionEvent {
 }
 
 /// Sanitizes sensitive tokens, credentials, and API keys from logged strings.
+///
+/// To prevent false positives on common flags like port mapping (`docker run -p 8080:80`),
+/// directory creation (`mkdir -p /path`), or ssh ports (`ssh -p 22`), the short `-p` flag
+/// is only redacted in credential-sensitive contexts (e.g., `docker login`, `mysql`, `mariadb`).
 pub fn sanitize_text(input: &str) -> String {
     use regex::Regex;
     use std::sync::OnceLock;
@@ -151,7 +155,8 @@ pub fn sanitize_text(input: &str) -> String {
     static GHP_REGEX: OnceLock<Regex> = OnceLock::new();
     static BEARER_REGEX: OnceLock<Regex> = OnceLock::new();
     static PASSWORD_FLAG_REGEX: OnceLock<Regex> = OnceLock::new();
-    static SHORT_P_FLAG_REGEX: OnceLock<Regex> = OnceLock::new();
+    static USER_PASS_REGEX: OnceLock<Regex> = OnceLock::new();
+    static CTX_P_REGEX: OnceLock<Regex> = OnceLock::new();
 
     let sk_re = SK_REGEX.get_or_init(|| Regex::new(r"sk-[a-zA-Z0-9_\-]{8,}").unwrap());
     let ghp_re = GHP_REGEX.get_or_init(|| {
@@ -159,17 +164,28 @@ pub fn sanitize_text(input: &str) -> String {
     });
     let bearer_re = BEARER_REGEX
         .get_or_init(|| Regex::new(r#"(?i)(authorization:\s*bearer\s+)[^\s"'\\]+"#).unwrap());
-    let pwd_re = PASSWORD_FLAG_REGEX
-        .get_or_init(|| Regex::new(r#"(?i)(--password(?:=|\s+))[^\s"'\\]+"#).unwrap());
-    let short_p_re = SHORT_P_FLAG_REGEX
-        .get_or_init(|| Regex::new(r#"(?:^|\s)(-p(?:=|\s+))[^\s"'\\]+"#).unwrap());
+    // Explicit password, token, or secret flags (--password, --passwd, --token, --api-key, etc.)
+    let pwd_re = PASSWORD_FLAG_REGEX.get_or_init(|| {
+        Regex::new(r#"(?i)(--(?:password|passwd|pwd|pass|token|api-key|apikey|secret|auth-token)(?:=|\s+))[^\s"'\\]+"#).unwrap()
+    });
+    // Basic auth in curl/wget: -u user:pass or --user user:pass
+    let user_pass_re = USER_PASS_REGEX.get_or_init(|| {
+        Regex::new(r#"(?i)((?:--user|-u)\s+[a-zA-Z0-9_.\-]+:)[^\s"'\\]+"#).unwrap()
+    });
+    // Contextual -p: ONLY redact -p when preceded by commands known to take -p as password
+    // (docker login, podman login, mysql, mysqldump, mariadb).
+    // In other tools, -p represents port (docker run, ssh), parallel (make), path (mkdir), etc.
+    let ctx_p_re = CTX_P_REGEX.get_or_init(|| {
+        Regex::new(r#"(?i)\b((?:docker\s+login|podman\s+login|mysql|mysqldump|mariadb)\b.*?)\s+(-p(?:=|\s*))[^\s"'\\]+"#).unwrap()
+    });
 
     let s1 = sk_re.replace_all(input, "[REDACTED]");
     let s2 = ghp_re.replace_all(&s1, "[REDACTED]");
     let s3 = bearer_re.replace_all(&s2, "${1}[REDACTED]");
     let s4 = pwd_re.replace_all(&s3, "${1}[REDACTED]");
-    let s5 = short_p_re.replace_all(&s4, " $1[REDACTED]");
-    s5.trim().to_string()
+    let s5 = user_pass_re.replace_all(&s4, "${1}[REDACTED]");
+    let s6 = ctx_p_re.replace_all(&s5, "$1 $2[REDACTED]");
+    s6.to_string()
 }
 
 pub struct SessionLogger {
@@ -379,6 +395,7 @@ mod tests {
             sanitize_text("git clone https://ghp_1234567890abcdefghij@github.com/repo.git"),
             "git clone https://[REDACTED]@github.com/repo.git"
         );
+        // Verify passwords and secrets are redacted
         assert_eq!(
             sanitize_text("mysql -u root --password my_secret_pass -h db"),
             "mysql -u root --password [REDACTED] -h db"
@@ -387,6 +404,33 @@ mod tests {
             sanitize_text("docker login -u admin -p supersecret123"),
             "docker login -u admin -p [REDACTED]"
         );
+        assert_eq!(
+            sanitize_text("mysql -u root -p supersecret123 -h localhost"),
+            "mysql -u root -p [REDACTED] -h localhost"
+        );
+        assert_eq!(
+            sanitize_text("curl -u admin:secret123 https://api.com"),
+            "curl -u admin:[REDACTED] https://api.com"
+        );
+
+        // Verify NON-password uses of -p are NOT falsely redacted!
+        assert_eq!(
+            sanitize_text("docker run -d -p 8080:80 nginx"),
+            "docker run -d -p 8080:80 nginx"
+        );
+        assert_eq!(
+            sanitize_text("mkdir -p /home/user/new_project"),
+            "mkdir -p /home/user/new_project"
+        );
+        assert_eq!(
+            sanitize_text("ssh -p 2222 user@remote.host"),
+            "ssh -p 2222 user@remote.host"
+        );
+        assert_eq!(
+            sanitize_text("pytest -p no:warnings"),
+            "pytest -p no:warnings"
+        );
+        assert_eq!(sanitize_text("make -p"), "make -p");
 
         // Verify end-to-end logging sanitization
         let temp = tempdir().unwrap();
