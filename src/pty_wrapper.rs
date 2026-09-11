@@ -1,11 +1,12 @@
 //! PTY process execution wrapper using portable-pty.
 
-use anyhow::{bail, Context, Result};
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+
+use anyhow::{bail, Context, Result};
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tracing::debug;
 
 /// Result of executing a command inside a pseudo-terminal.
@@ -41,7 +42,6 @@ pub fn run_pty(command: &[String]) -> Result<PtyResult> {
 
     debug!(command = ?command, "Spawning child process in PTY");
 
-    // Spawn child process in slave PTY
     let mut child = pair
         .slave
         .spawn_command(cmd_builder)
@@ -64,13 +64,13 @@ pub fn run_pty(command: &[String]) -> Result<PtyResult> {
     let is_running = Arc::new(AtomicBool::new(true));
     let is_running_writer = Arc::clone(&is_running);
 
-    // Thread 1: Read from PTY master and forward to host stdout, while accumulating output
+    // Pump PTY master stdout to host stdout while buffering captured bytes
     let output_handle = thread::spawn(move || {
         let mut buffer = [0u8; 4096];
         let mut stdout = std::io::stdout();
         loop {
             match master_reader.read(&mut buffer) {
-                Ok(0) => break, // EOF reached
+                Ok(0) => break,
                 Ok(n) => {
                     let chunk = &buffer[..n];
                     let _ = stdout.write_all(chunk);
@@ -79,12 +79,12 @@ pub fn run_pty(command: &[String]) -> Result<PtyResult> {
                         captured.extend_from_slice(chunk);
                     }
                 }
-                Err(_) => break, // Master closed or broken pipe
+                Err(_) => break,
             }
         }
     });
 
-    // Thread 2: Read from host stdin and forward to PTY master
+    // Pump host stdin to PTY master until EOF or child exit
     let input_handle = thread::spawn(move || {
         let mut stdin = std::io::stdin();
         let mut buffer = [0u8; 1024];
@@ -109,7 +109,6 @@ pub fn run_pty(command: &[String]) -> Result<PtyResult> {
         }
     });
 
-    // Wait for the child process to exit
     let exit_status = child
         .wait()
         .context("Failed while waiting for child process")?;
@@ -119,10 +118,7 @@ pub fn run_pty(command: &[String]) -> Result<PtyResult> {
     // Dropping master closes the pseudo-console on ConPTY/PTY, terminating reader
     drop(pair.master);
 
-    // Wait for output thread to finish consuming remaining bytes
     let _ = output_handle.join();
-
-    // Input handle will either finish on EOF or terminate with process
     drop(input_handle);
 
     let exit_code = if exit_status.success() {
@@ -144,22 +140,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_echo_hola() {
-        let res = run_pty(&[
+    fn test_run_pty_captures_stdout_from_command() {
+        let pty_result = run_pty(&[
             "bash".to_string(),
             "-c".to_string(),
             "echo hola".to_string(),
         ])
         .expect("run_pty failed");
-        let output_str = String::from_utf8_lossy(&res.output);
+        let output_str = String::from_utf8_lossy(&pty_result.output);
         assert!(output_str.contains("hola"));
-        assert_eq!(res.exit_code, 0);
+        assert_eq!(pty_result.exit_code, 0);
     }
 
     #[test]
-    fn test_non_zero_exit_code() {
-        let res = run_pty(&["bash".to_string(), "-c".to_string(), "exit 42".to_string()])
+    fn test_run_pty_propagates_child_exit_code() {
+        let pty_result = run_pty(&["bash".to_string(), "-c".to_string(), "exit 42".to_string()])
             .expect("run_pty failed");
-        assert_eq!(res.exit_code, 42);
+        assert_eq!(pty_result.exit_code, 42);
     }
 }

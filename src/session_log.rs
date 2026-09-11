@@ -179,13 +179,13 @@ pub fn sanitize_text(input: &str) -> String {
         Regex::new(r#"(?i)\b((?:docker\s+login|podman\s+login|mysql|mysqldump|mariadb)\b.*?)\s+(-p(?:=|\s*))[^\s"'\\]+"#).unwrap()
     });
 
-    let s1 = sk_re.replace_all(input, "[REDACTED]");
-    let s2 = ghp_re.replace_all(&s1, "[REDACTED]");
-    let s3 = bearer_re.replace_all(&s2, "${1}[REDACTED]");
-    let s4 = pwd_re.replace_all(&s3, "${1}[REDACTED]");
-    let s5 = user_pass_re.replace_all(&s4, "${1}[REDACTED]");
-    let s6 = ctx_p_re.replace_all(&s5, "$1 $2[REDACTED]");
-    s6.to_string()
+    let sanitized = sk_re.replace_all(input, "[REDACTED]");
+    let sanitized = ghp_re.replace_all(&sanitized, "[REDACTED]");
+    let sanitized = bearer_re.replace_all(&sanitized, "${1}[REDACTED]");
+    let sanitized = pwd_re.replace_all(&sanitized, "${1}[REDACTED]");
+    let sanitized = user_pass_re.replace_all(&sanitized, "${1}[REDACTED]");
+    let sanitized = ctx_p_re.replace_all(&sanitized, "$1 $2[REDACTED]");
+    sanitized.to_string()
 }
 
 pub struct SessionLogger {
@@ -284,22 +284,21 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn test_log_and_read_events_lifecycle() {
-        let temp = tempdir().unwrap();
-        let logger = SessionLogger::new(temp.path());
+    fn test_session_logger_persists_and_reads_ordered_events() {
+        let temp_dir = tempdir().unwrap();
+        let logger = SessionLogger::new(temp_dir.path());
 
-        // Verify missing log file returns empty vector
-        let empty = logger.read_events(None, None).unwrap();
-        assert!(empty.is_empty());
+        let initial_events = logger.read_events(None, None).unwrap();
+        assert!(initial_events.is_empty());
 
-        let t1 = Utc::now();
+        let timestamp = Utc::now();
         let event1 = SessionEvent::SessionStarted {
-            timestamp: t1,
+            timestamp,
             session_id: "sess-01".to_string(),
             command: "echo test".to_string(),
         };
         let event2 = SessionEvent::CommandEvaluated {
-            timestamp: t1,
+            timestamp,
             session_id: "sess-01".to_string(),
             command: "echo test".to_string(),
             policy_action: "allow".to_string(),
@@ -307,13 +306,13 @@ mod tests {
             reason: None,
         };
         let event3 = SessionEvent::CheckpointCreated {
-            timestamp: t1,
+            timestamp,
             session_id: "sess-01".to_string(),
             checkpoint_id: "1234567".to_string(),
             description: "before: echo test".to_string(),
         };
         let event4 = SessionEvent::SessionEnded {
-            timestamp: t1,
+            timestamp,
             session_id: "sess-01".to_string(),
             exit_code: Some(0),
             duration_ms: Some(15),
@@ -324,65 +323,61 @@ mod tests {
         logger.log_event(&event3).unwrap();
         logger.log_event(&event4).unwrap();
 
-        let all = logger.read_events(None, None).unwrap();
-        assert_eq!(all.len(), 4);
-        assert_eq!(all[0], event1);
-        assert_eq!(all[1], event2);
-        assert_eq!(all[2], event3);
-        assert_eq!(all[3], event4);
+        let all_events = logger.read_events(None, None).unwrap();
+        assert_eq!(all_events.len(), 4);
+        assert_eq!(all_events[0], event1);
+        assert_eq!(all_events[1], event2);
+        assert_eq!(all_events[2], event3);
+        assert_eq!(all_events[3], event4);
     }
 
     #[test]
-    fn test_filter_by_session_and_tail() {
-        let temp = tempdir().unwrap();
-        let logger = SessionLogger::new(temp.path());
+    fn test_session_logger_filters_by_session_id_and_limits_with_tail() {
+        let temp_dir = tempdir().unwrap();
+        let logger = SessionLogger::new(temp_dir.path());
 
-        let t = Utc::now();
-        let e1 = SessionEvent::SessionStarted {
-            timestamp: t,
+        let timestamp = Utc::now();
+        let event_a1 = SessionEvent::SessionStarted {
+            timestamp,
             session_id: "sess-A".to_string(),
             command: "cmd A1".to_string(),
         };
-        let e2 = SessionEvent::SessionStarted {
-            timestamp: t,
+        let event_b1 = SessionEvent::SessionStarted {
+            timestamp,
             session_id: "sess-B".to_string(),
             command: "cmd B1".to_string(),
         };
-        let e3 = SessionEvent::SessionStarted {
-            timestamp: t,
+        let event_a2 = SessionEvent::SessionStarted {
+            timestamp,
             session_id: "sess-A".to_string(),
             command: "cmd A2".to_string(),
         };
 
-        logger.log_event(&e1).unwrap();
-        logger.log_event(&e2).unwrap();
-        logger.log_event(&e3).unwrap();
+        logger.log_event(&event_a1).unwrap();
+        logger.log_event(&event_b1).unwrap();
+        logger.log_event(&event_a2).unwrap();
 
-        // Filter by session A
         let filtered_a = logger.read_events(Some("sess-A"), None).unwrap();
         assert_eq!(filtered_a.len(), 2);
-        assert_eq!(filtered_a[0], e1);
-        assert_eq!(filtered_a[1], e3);
+        assert_eq!(filtered_a[0], event_a1);
+        assert_eq!(filtered_a[1], event_a2);
 
-        // Filter by session B
         let filtered_b = logger.read_events(Some("sess-B"), None).unwrap();
         assert_eq!(filtered_b.len(), 1);
-        assert_eq!(filtered_b[0], e2);
+        assert_eq!(filtered_b[0], event_b1);
 
-        // Tail of 2 events
         let tail_2 = logger.read_events(None, Some(2)).unwrap();
         assert_eq!(tail_2.len(), 2);
-        assert_eq!(tail_2[0], e2);
-        assert_eq!(tail_2[1], e3);
+        assert_eq!(tail_2[0], event_b1);
+        assert_eq!(tail_2[1], event_a2);
 
-        // Tail of 1 event with session filter
         let tail_a = logger.read_events(Some("sess-A"), Some(1)).unwrap();
         assert_eq!(tail_a.len(), 1);
-        assert_eq!(tail_a[0], e3);
+        assert_eq!(tail_a[0], event_a2);
     }
 
     #[test]
-    fn test_secret_sanitization_patterns() {
+    fn test_sanitize_text_redacts_credentials_without_false_positives() {
         assert_eq!(
             sanitize_text("curl -H 'Authorization: Bearer my_secret_token_123' https://api.com"),
             "curl -H 'Authorization: Bearer [REDACTED]' https://api.com"
@@ -395,7 +390,7 @@ mod tests {
             sanitize_text("git clone https://ghp_1234567890abcdefghij@github.com/repo.git"),
             "git clone https://[REDACTED]@github.com/repo.git"
         );
-        // Verify passwords and secrets are redacted
+
         assert_eq!(
             sanitize_text("mysql -u root --password my_secret_pass -h db"),
             "mysql -u root --password [REDACTED] -h db"
@@ -413,7 +408,6 @@ mod tests {
             "curl -u admin:[REDACTED] https://api.com"
         );
 
-        // Verify NON-password uses of -p are NOT falsely redacted!
         assert_eq!(
             sanitize_text("docker run -d -p 8080:80 nginx"),
             "docker run -d -p 8080:80 nginx"
@@ -432,9 +426,8 @@ mod tests {
         );
         assert_eq!(sanitize_text("make -p"), "make -p");
 
-        // Verify end-to-end logging sanitization
-        let temp = tempdir().unwrap();
-        let logger = SessionLogger::new(temp.path());
+        let temp_dir = tempdir().unwrap();
+        let logger = SessionLogger::new(temp_dir.path());
         let event = SessionEvent::SessionStarted {
             timestamp: Utc::now(),
             session_id: "sec-01".to_string(),
@@ -443,9 +436,9 @@ mod tests {
         };
 
         logger.log_event(&event).unwrap();
-        let read = logger.read_events(None, None).unwrap();
-        assert_eq!(read.len(), 1);
-        if let SessionEvent::SessionStarted { command, .. } = &read[0] {
+        let logged_events = logger.read_events(None, None).unwrap();
+        assert_eq!(logged_events.len(), 1);
+        if let SessionEvent::SessionStarted { command, .. } = &logged_events[0] {
             assert!(!command.contains("sk-ant-1234567890"));
             assert!(!command.contains("mysecret"));
             assert!(command.contains("[REDACTED]"));

@@ -5,6 +5,9 @@ edition = "2021"
 authors = ["Leash Contributors"]
 description = "Transparent security wrapper and rewind engine for AI coding agents"
 license = "MIT"
+repository = "https://github.com/JMX234-spe/leash"
+keywords = ["security", "pty", "sandbox", "git", "cli"]
+categories = ["command-line-utilities", "development-tools"]
 readme = "README.md"
 
 [dependencies]
@@ -16,13 +19,12 @@ serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 serde_json = "1.0"
 anyhow = "1.0"
-thiserror = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 regex = "1.10"
 chrono = { version = "0.4", features = ["serde"] }
-tempfile = "3.10"
 
 [dev-dependencies]
 assert_cmd = "2.0"
 predicates = "3.1"
+tempfile = "3.10"

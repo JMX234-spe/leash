@@ -1,12 +1,13 @@
 //! Policy evaluation engine.
 
-use crate::policy::schema::{PolicyAction, PolicyConfig, PolicyRule};
 use anyhow::Result;
 use regex::Regex;
 
+use crate::policy::schema::{PolicyAction, PolicyConfig, PolicyRule};
+
 /// Compiled rule with regex for fast evaluation.
 #[derive(Debug)]
-pub struct CompiledRule {
+pub(crate) struct CompiledRule {
     pub rule: PolicyRule,
     pub regex: Regex,
 }
@@ -15,7 +16,7 @@ pub struct CompiledRule {
 #[derive(Debug)]
 pub struct PolicyEngine {
     pub config: PolicyConfig,
-    pub compiled_rules: Vec<CompiledRule>,
+    pub(crate) compiled_rules: Vec<CompiledRule>,
 }
 
 /// Result of evaluating a command string against the policy.
@@ -47,7 +48,6 @@ pub fn normalize_command(command: &str) -> String {
         }
     }
 
-    // Normalize common flag permutations for destructive commands
     collapsed
         .replace("-r -f", "-rf")
         .replace("-f -r", "-rf")
@@ -107,7 +107,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_normalize_command_whitespace_and_flags() {
+    fn test_normalize_command_collapses_whitespace_and_normalizes_destructive_flags() {
         assert_eq!(normalize_command("  rm   -rf    /  "), "rm -rf /");
         assert_eq!(normalize_command("rm\t-r\t-f\t/"), "rm -rf /");
         assert_eq!(normalize_command("rm -f -r /"), "rm -rf /");

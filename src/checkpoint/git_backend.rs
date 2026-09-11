@@ -1,9 +1,10 @@
 //! Git backend for creating, listing, and restoring checkpoints on `refs/leash/checkpoints`.
 
+use std::path::{Path, PathBuf};
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 
 pub const CHECKPOINT_REF: &str = "refs/leash/checkpoints";
 
@@ -155,8 +156,8 @@ impl GitCheckpointBackend {
 
         let mut checkpoints = Vec::new();
 
-        for oid_res in revwalk {
-            let oid = oid_res.context("Failed to get commit OID in revwalk")?;
+        for commit_oid_result in revwalk {
+            let oid = commit_oid_result.context("Failed to get commit OID in revwalk")?;
             let commit = repo.find_commit(oid).context("Failed to find commit")?;
             let short_id = format!("{:.7}", oid);
 
@@ -183,11 +184,11 @@ impl GitCheckpointBackend {
         let repo =
             git2::Repository::open(&self.repo_root).context("Failed to open git repository")?;
 
-        let obj = repo
+        let checkpoint_git_obj = repo
             .revparse_single(checkpoint_id)
             .with_context(|| format!("Checkpoint '{}' not found", checkpoint_id))?;
 
-        let commit = obj
+        let commit = checkpoint_git_obj
             .peel_to_commit()
             .with_context(|| format!("Object '{}' is not a commit", checkpoint_id))?;
 
@@ -199,11 +200,11 @@ impl GitCheckpointBackend {
         let msg = commit.message().unwrap_or_default();
         let checkpoint_info = parse_commit_message(&short_id, &commit, msg);
 
-        // 1. Create an automatic safety checkpoint BEFORE destructive rewind
+        // Pre-rewind safety snapshot ensures uncommitted work is recoverable.
         let pre_rewind_desc = format!("pre-rewind backup: before restoring {}", checkpoint_id);
         let _ = self.create_checkpoint("rewind-backup", &pre_rewind_desc)?;
 
-        // 2. Preserve .leash via local .leash.bak (not an ephemeral /tmp directory)
+        // Local .leash.bak backup preserves audit logs and policy across destructive checkout.
         let leash_dir = self.repo_root.join(".leash");
         let backup_dir = self.repo_root.join(".leash.bak");
         let had_leash = leash_dir.exists();
@@ -216,11 +217,10 @@ impl GitCheckpointBackend {
                 .context("Failed to create local .leash.bak backup before rewind")?;
         }
 
-        // 3. Configure repo in-memory ignore rule so CheckoutBuilder::remove_untracked
-        // explicitly excludes .leash and .leash.bak from being touched by git
+        // In-memory ignore rule guarantees checkout_tree(remove_untracked=true) ignores .leash.
         let _ = repo.add_ignore_rule(".leash\n.leash/*\n.leash.bak\n.leash.bak/*\n");
 
-        // 4. Checkout tree with force and remove untracked
+        // Perform forced checkout to restore working directory files.
         let mut checkout = git2::build::CheckoutBuilder::new();
         checkout.force();
         checkout.remove_untracked(true);
@@ -233,7 +233,7 @@ impl GitCheckpointBackend {
             return Err(e).context("Failed to checkout checkpoint tree into working directory");
         }
 
-        // 5. Synchronize repository index
+        // Synchronize repository index with the restored tree.
         let mut index = repo.index().context("Failed to open index")?;
         let sync_res = index.read_tree(&tree).and_then(|_| index.write());
         if let Err(e) = sync_res {
@@ -243,7 +243,7 @@ impl GitCheckpointBackend {
             return Err(e).context("Failed to sync index with restored tree");
         }
 
-        // 6. Confirm success: ensure .leash is intact, then remove .leash.bak
+        // Restore .leash from local backup if affected, then clean up .leash.bak.
         if had_leash {
             if !leash_dir.exists() && backup_dir.exists() {
                 copy_dir_all(&backup_dir, &leash_dir)
@@ -280,14 +280,14 @@ fn parse_commit_message(short_id: &str, commit: &git2::Commit, message: &str) ->
 
     for line in message.lines() {
         let trimmed = line.trim();
-        if let Some(val) = trimmed.strip_prefix("session_id:") {
-            session_id = val.trim().to_string();
-        } else if let Some(val) = trimmed.strip_prefix("timestamp:") {
-            if let Ok(dt) = DateTime::parse_from_rfc3339(val.trim()) {
+        if let Some(parsed_session) = trimmed.strip_prefix("session_id:") {
+            session_id = parsed_session.trim().to_string();
+        } else if let Some(parsed_timestamp_str) = trimmed.strip_prefix("timestamp:") {
+            if let Ok(dt) = DateTime::parse_from_rfc3339(parsed_timestamp_str.trim()) {
                 timestamp = Some(dt.with_timezone(&Utc));
             }
-        } else if let Some(val) = trimmed.strip_prefix("description:") {
-            description = val.trim().to_string();
+        } else if let Some(parsed_desc) = trimmed.strip_prefix("description:") {
+            description = parsed_desc.trim().to_string();
         }
     }
 
