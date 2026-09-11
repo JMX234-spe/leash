@@ -425,6 +425,10 @@ mod tests {
             "pytest -p no:warnings"
         );
         assert_eq!(sanitize_text("make -p"), "make -p");
+        assert_eq!(
+            sanitize_text("tar -xvpf archivo.tar"),
+            "tar -xvpf archivo.tar"
+        );
 
         let temp_dir = tempdir().unwrap();
         let logger = SessionLogger::new(temp_dir.path());

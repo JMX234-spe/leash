@@ -3,16 +3,16 @@ rules:
   - name: "block-destructive-rm"
     match: "rm\\s+-rf\\s+(/|~|\\.\\.)"
     action: deny
-    reason: "Comando destructivo detectado sobre una ruta sensible"
+    reason: "Destructive command targeting sensitive directory"
 
   - name: "confirm-force-push"
     match: "git\\s+push\\s+.*--force"
     action: ask
-    reason: "Push forzado puede sobrescribir historial remoto"
+    reason: "Force push risks overwriting remote repository history"
 
   - name: "block-unlisted-network"
     match: "curl\\s+http"
     action: ask
-    reason: "Llamada de red no está en la whitelist"
+    reason: "Network request is not on the allowed list"
 
-default_action: allow # qué hacer si ningún patrón coincide: allow | ask | deny
+default_action: allow # Action when no rule matches: allow | ask | deny

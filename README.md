@@ -1,302 +1,150 @@
-# Leash 🦮
+# Leash
 
-[![CI](https://github.com/JMX234-/leash/actions/workflows/ci.yml/badge.svg)](https://github.com/JMX234-/leash/actions/workflows/ci.yml)
+[![CI](https://github.com/JMX234-spe/leash/actions/workflows/ci.yml/badge.svg)](https://github.com/JMX234-spe/leash/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Rust: 2021](https://img.shields.io/badge/Rust-2021-orange.svg)](https://www.rust-lang.org)
 
-> **Transparent security wrapper and git-based rewind engine for AI coding agents.**
+Leash wraps arbitrary CLI-based coding agents via a pseudo-terminal (PTY), evaluates declarative security policies, logs structured JSONL audit events locally, and creates automatic git-based checkpoints for instant rollback. Nothing leaves your machine.
 
-Leash wraps the execution of arbitrary AI coding agents (`claude`, `cursor`, `aider`, `codex`, shell scripts, etc.) via a pseudo-terminal (PTY) without requiring any modifications to those tools. It provides three core capabilities:
+<!-- TODO: Record animated demo (asciinema / GIF) when CLI interface stabilizes -->
 
-1. **Declarative Security Policy Engine**: Intercepts commands against rules declared in `.leash/policy.yaml` (`allow`, `ask`, `deny`).
-2. **Git-Based Checkpoints & Rewind**: Automatically snapshots working tree state to a hidden git ref (`refs/leash/checkpoints`) before execution and allows instantaneous restoration (`leash rewind`).
-3. **Structured Audit Trail**: Records 100% local, zero-telemetry JSONL audit events in `.leash/log.jsonl`.
+```console
+$ leash init
+Initialized Leash configuration at .leash/policy.yaml
 
----
+$ leash run -- rm -rf /
+[LEASH BLOCKED] Command blocked by policy rule 'block-destructive-rm'
+Reason: Destructive command targeting sensitive directory
+Command: rm -rf /
 
-## Architecture Overview
+$ leash run -- python -c "open('app.py', 'a').write('\ndef apply_discount(): pass\n')"
+[LEASH] Created pre-execution checkpoint d4c21e3
 
+$ leash run -- python -c "open('app.py', 'w').write('CORRUPTED SYNTAX'); open('unwanted.tmp', 'w').write('garbage')"
+[LEASH] Created pre-execution checkpoint 3a4a4e8
+
+$ leash checkpoints
+ID         SESSION    TIMESTAMP                 DESCRIPTION
+-------    -------    ------------------------- -----------
+3a4a4e8    8e33a4b0   2026-09-11 02:02:24 UTC   before: python -c open('app.py', 'w').write('CORRUPTED SYNTAX'); open('unwanted.tmp', 'w').write('garbage')
+d4c21e3    8e33a3b0   2026-09-11 02:02:24 UTC   before: python -c open('app.py', 'a').write('\ndef apply_discount(): pass\n')
+
+$ leash rewind 3a4a4e8 --yes
+[LEASH] Successfully rewound working directory to checkpoint 3a4a4e8 (before: python -c open('app.py', 'w').write('CORRUPTED SYNTAX'); open('unwanted.tmp', 'w').write('garbage'))
+
+$ cat app.py
+def calculate_total():
+    return 100
+
+$ ls unwanted.tmp
+ls: cannot access 'unwanted.tmp': No such file or directory
 ```
-                        +---------------------------------------------+
-                        |                 User Shell                  |
-                        +---------------------------------------------+
-                                               |
-                                        leash run -- <cmd>
-                                               v
-+-----------------------------------------------------------------------------------------+
-| LEASH EXECUTION HARNESS                                                                 |
-|                                                                                         |
-|  1. Policy Engine             2. Hidden Git Checkpoint            3. PTY Wrapper        |
-|  +--------------------+       +---------------------------+       +-------------------+ |
-|  | Evaluates command  |       | Tree snapshot committed   |       | Spawns agent in   | |
-|  | against regexes in | ----> | to hidden git ref:        | ----> | pseudo-terminal   | |
-|  | .leash/policy.yaml |       | refs/leash/checkpoints    |       | (portable-pty)    | |
-|  +--------------------+       +---------------------------+       +-------------------+ |
-|            |                                |                               |           |
-|            v                                v                               v           |
-|  +-----------------------------------------------------------------------------------+  |
-|  | Structured Audit Logger (.leash/log.jsonl - Append Only, Preserved on Rewind)     |  |
-|  +-----------------------------------------------------------------------------------+  |
-+-----------------------------------------------------------------------------------------+
-                                               |
-                                               v
-                        +---------------------------------------------+
-                        |       Target Agent / Subprocess Output      |
-                        |      (Transparent Bidirectional I/O)        |
-                        +---------------------------------------------+
-```
-
----
 
 ## Installation
 
 ### Prerequisites
 - **Rust toolchain** (Rust 1.75+ or 2021 edition): [rustup.rs](https://rustup.rs)
-- **Git** (for checkpointing backend): [git-scm.com](https://git-scm.com)
-- **Supported Operating Systems**: Linux (`x86_64`, `aarch64`) and macOS (`x86_64`, Apple Silicon). Windows is supported for local development.
+- **Git** (required for checkpoint backend): [git-scm.com](https://git-scm.com)
 
-### Build & Install from Source
+### Build and Install from Source
 
 ```bash
-# Clone repository
-git clone https://github.com/JMX234-/leash.git
+git clone https://github.com/JMX234-spe/leash.git
 cd leash
-
-# Build release binary
-cargo build --release
-
-# Install locally to ~/.cargo/bin
 cargo install --path .
 ```
 
-Verify the installation:
+Verify the binary is available in your `$PATH`:
 ```bash
 leash --version
-leash --help
 ```
-
----
 
 ## Quickstart
 
-### 1. Initialize Leash in your Repository
-Inside any Git repository, run:
+Initialize Leash in any Git repository:
 ```bash
 leash init
 ```
-This creates `.leash/policy.yaml` with recommended default security rules.
 
-### 2. Wrap an AI Agent or Command
-Prefix your usual agent invocation with `leash run --`:
+Wrap an AI coding agent or command:
 ```bash
-# Wrap Claude Code
-leash run -- claude "fix the authentication bug"
-
-# Wrap Aider
-leash run -- aider --model sonnet
-
-# Wrap any arbitrary shell command or script
-leash run -- bash -c "pytest tests/"
+leash run -- claude "refactor authentication service"
 ```
 
-Before the command begins:
-- The policy engine evaluates the top-level command.
-- If allowed, a snapshot is automatically saved to `refs/leash/checkpoints`.
-- The agent runs interactively with full PTY color, cursor controls, and streaming I/O.
-- The command's exit code is transparently propagated back to your shell.
-
-### 3. Inspect Checkpoints
-List all recorded checkpoints:
+List recorded checkpoints:
 ```bash
 leash checkpoints
 ```
-Example output:
-```
-ID         SESSION    TIMESTAMP                 DESCRIPTION
--------    -------    ------------------------- -----------
-f3b9a1c    a1b2c3d4   2026-09-10 18:25:00 UTC   before: claude "fix the authentication bug"
-```
 
-### 4. Rewind Risky Changes
-If the AI agent made unwanted edits or broke your working tree:
+Restore your repository to any pre-execution state:
 ```bash
-# Rewind to a checkpoint (interactive confirmation prompt)
-leash rewind f3b9a1c
-
-# Or proceed non-interactively in scripts
-leash rewind f3b9a1c --yes
+leash rewind <checkpoint-id>
 ```
-Leash restores all tracked files and removes newly created untracked garbage while keeping your user branch (`main`/`master`) and commit history intact.
 
-### 5. Audit Session Logs
-View the structured audit log:
+Inspect local session audit events:
 ```bash
-# View formatted audit trail
 leash log
-
-# Filter by session ID
-leash log --session a1b2c3d4
-
-# View only the last N events
-leash log -n 5
-
-# Output raw JSONL (ideal for piping into jq)
-leash log --json | jq .
 ```
 
----
+## How It Works
+
+- **PTY Wrapper**: Leash uses `portable-pty` to spawn commands inside a pseudo-terminal. It passes stdin, stdout, and stderr transparently, preserving terminal features (colors, cursor control, interactive prompts) and propagating the child process exit code upon exit.
+- **Policy Engine**: Before spawning the child process, Leash normalizes whitespace and common flag variants (`-r -f`, `--force --recursive` -> `-rf`) and matches the command against regular expressions defined in `.leash/policy.yaml`. Rules evaluate in top-down order; the first match determines the action (`allow`, `ask`, or `deny`).
+- **Git Checkpoints**: Prior to running any allowed command, Leash commits the current working tree state to a hidden Git reference (`refs/leash/checkpoints`). The user's active branch and `HEAD` commit remain completely untouched. The `.leash/` directory is excluded from snapshots.
+- **Transactional Rewind**: Running `leash rewind` creates an automatic safety backup, backs up `.leash/` locally to `.leash.bak`, executes a forced tree checkout with untracked file removal, updates the Git index, and restores `.leash/`.
+- **Audit Logging**: Every session event (start, policy evaluation, checkpoint creation, rewind execution, termination) is recorded in `.leash/log.jsonl`. Sensitive tokens (`sk-...`, `ghp_...`, Bearer tokens, passwords) are automatically redacted prior to being written to disk.
 
 ## CLI Reference
 
-### `leash init`
-```bash
-leash init [--force]
-```
-Initializes the `.leash/` directory in the current repository root with an initial `policy.yaml` configuration. If a policy file already exists, `--force` can be passed to overwrite it.
-
-### `leash run`
-```bash
-leash run -- <command> [args...]
-```
-Executes `<command>` wrapped inside a pseudo-terminal:
-- Evaluates `.leash/policy.yaml`.
-- Enforces `deny` (exit code `126`) or `ask` prompts (`[y/N]`).
-- Automatically takes a git tree checkpoint in `refs/leash/checkpoints`.
-- Streams all standard input/output/error transparently.
-- Logs events to `.leash/log.jsonl`.
-- Exits with the exact exit code produced by `<command>`.
-
-### `leash checkpoints`
-```bash
-leash checkpoints [--session <session_id>]
-```
-Lists recorded snapshots, including short commit hash, session identifier, timestamp, and description.
-
-### `leash rewind`
-```bash
-leash rewind <checkpoint_id> [--yes]
-```
-Restores the working directory to the exact tree recorded at `<checkpoint_id>`:
-- Uses forced checkout and cleans untracked files added by the wrapped session.
-- **Never changes `HEAD` or user branches**.
-- Preserves the `.leash/` audit log and policy configuration.
-
-### `leash log`
-```bash
-leash log [--session <id>] [-n|--tail <N>] [--json]
-```
-Displays recorded audit events from `.leash/log.jsonl`. Supports session filtering, tail limits, and raw JSONL export.
-
----
+| Command | Arguments | Description |
+| :--- | :--- | :--- |
+| `leash init` | `[--force]` | Initializes `.leash/policy.yaml` with default security rules. |
+| `leash run` | `-- <command> [args...]` | Spawns `<command>` in a PTY with policy enforcement and automatic checkpointing. |
+| `leash checkpoints` | `[--session <id>]` | Lists all recorded snapshots, optionally filtered by session identifier. |
+| `leash rewind` | `<checkpoint-id> [--yes]` | Restores the working directory to the specified checkpoint. |
+| `leash log` | `[--session <id>] [-n <count>] [--json]` | Displays recorded session events as a table or raw JSONL. |
 
 ## Policy Configuration (`.leash/policy.yaml`)
 
-Policies are declared in YAML. Rules are evaluated sequentially from top to bottom; the first rule whose regular expression matches determines the outcome.
+Policies are declared in YAML. Rules are evaluated sequentially:
 
 ```yaml
 version: 1
 
 rules:
-  # Block destructive filesystem commands
   - name: "block-destructive-rm"
     match: "rm\\s+-rf\\s+(/|~|\\.\\.)"
     action: deny
     reason: "Destructive command targeting sensitive directory"
 
-  # Block raw disk formatting
-  - name: "block-mkfs"
-    match: "mkfs\\b"
-    action: deny
-    reason: "Disk format attempt detected"
-
-  # Ask confirmation before force pushing
   - name: "confirm-force-push"
     match: "git\\s+push\\s+.*--force"
     action: ask
-    reason: "Force push may overwrite remote history"
+    reason: "Force push risks overwriting remote repository history"
 
-  # Ask confirmation for unlisted network tools
-  - name: "confirm-curl"
-    match: "curl\\s+https?://"
+  - name: "block-unlisted-network"
+    match: "curl\\s+http"
     action: ask
-    reason: "Outbound network request requires review"
+    reason: "Network request is not on the allowed list"
 
-# Fallback action if no rules match (allow | ask | deny)
 default_action: allow
 ```
 
-### Policy Actions & Non-Interactive Safety
-| Action | Interactive Terminal (TTY) | Non-Interactive (CI / Scripts) | Exit Code |
-| :--- | :--- | :--- | :--- |
-| `allow` | Proceeds immediately | Proceeds immediately | Propagated from command |
-| `ask` | Prompts `[y/N]` | **Treated automatically as `deny`** | `126` (blocked) or `1` (aborted) |
-| `deny` | Blocked immediately | Blocked immediately | `126` |
+### Policy Actions
 
-> [!IMPORTANT]
-> In non-interactive environments (such as CI pipelines or headless scripts without a TTY), `ask` rules automatically fail-safe to `deny` with exit code `126`. This prevents headless automated processes from hanging indefinitely.
+- `allow`: Command runs immediately.
+- `ask`: Prompts the user `[y/N]` before proceeding. In non-interactive environments (without a TTY, such as CI), `ask` rules are automatically treated as `deny` (exit code `126`) to avoid blocking pipelines indefinitely.
+- `deny`: Command execution is blocked immediately with exit code `126`.
 
----
+## Known Limitations (v0.1)
 
-## Checkpointing Mechanics & Safety Guarantees
+- **Top-Level Command Evaluation**: Policy inspection is performed solely on the top-level command string passed to `leash run -- <cmd>`. Subcommands executed inside subshells, scripts, or child processes spawned by the wrapped program are not intercepted at the OS kernel or syscall level in v0.1.
+- **Signal Handling**: Terminal signals (SIGINT, SIGTERM, SIGWINCH) are not yet forwarded down the PTY hierarchy. Pressing `Ctrl+C` will terminate the parent process but may leave child processes running in certain environments.
+- **Platform Support**: Primary development and CI targets are Linux and macOS. Windows support relies on ConPTY and is intended for local testing; edge cases around terminal resizing and pseudo-console handling may differ from Unix systems.
 
-Leash implements non-destructive git checkpointing:
+## Contributing
 
-1. **Hidden Git Reference (`refs/leash/checkpoints`)**:
-   - Checkpoint commits are created directly on `refs/leash/checkpoints`.
-   - Your active branch (`main`, `feature`, etc.) and `HEAD` reference are never moved or updated.
-   - Works seamlessly even on newly initialized repositories with an unborn `HEAD` (before your initial commit).
-
-2. **Exclusion of `.leash/` Directory**:
-   - Checkpoint git trees explicitly exclude `.leash/`.
-   - Audit logs (`log.jsonl`) and policy files are not versioned into checkpoints, preventing recursion and repository bloat.
-
-3. **Append-Only Audit Log Preservation**:
-   - During `leash rewind`, Leash backs up the local `.leash/` directory before restoring the tree and restores it immediately after checkout.
-   - The security audit trail is never deleted or reverted when traveling back in time.
-
----
-
-## Limitations & Scope (v0.1)
-
-> [!NOTE]
-> **Top-Level Command Interception Limitation:**
-> In Leash v0.1, declarative policy evaluation is applied strictly to the top-level command passed to `leash run -- <command> [args...]`.
-> Subcommands or background processes spawned internally by the AI agent (e.g., inside an interactive subshell) are not intercepted at the OS kernel/system call level in this release. System call / seccomp / eBPF process tree interception is planned for future iterations.
-
----
-
-## Development & Contributing
-
-Contributions are welcome! To contribute to Leash:
-
-### 1. Set Up Environment
-Ensure you have Rust and Git installed:
-```bash
-cargo --version
-git --version
-```
-
-### 2. Run Test Suite
-Run all unit and integration tests:
-```bash
-cargo test
-```
-
-### 3. Check Code Quality & Formatting
-We maintain zero warnings with clippy and strict rustfmt formatting:
-```bash
-cargo fmt -- --check
-cargo clippy -- -D warnings
-```
-
-### 4. Submitting Pull Requests
-- Keep PRs focused with descriptive commits.
-- Ensure all existing tests pass and add new tests for any added features or bug fixes.
-- PRs automatically run continuous integration across Ubuntu and macOS.
-
----
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, test execution, and code style guidelines.
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
-
+Leash is released under the [MIT License](LICENSE).
